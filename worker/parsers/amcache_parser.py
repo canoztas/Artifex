@@ -24,7 +24,7 @@ from typing import Any
 import zstandard
 from Registry import Registry
 
-log = logging.getLogger("pickaxe.parser.amcache")
+log = logging.getLogger("artifex.parser.amcache")
 
 _BATCH_SIZE = 500
 
@@ -121,7 +121,7 @@ def parse_amcache(
     blob_path:
         Path to the (possibly zstd-compressed) AmCache hive on disk.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------

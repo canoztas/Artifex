@@ -19,7 +19,7 @@ export default function App() {
               <span className="text-white font-bold text-sm">P</span>
             </div>
             <h1 className="text-lg font-semibold text-slate-100 tracking-tight">
-              Pickaxe <span className="text-forensic-400">DFIR</span>
+              Artifex <span className="text-forensic-400">DFIR</span>
             </h1>
           </div>
           <div className="ml-auto text-xs text-slate-500">

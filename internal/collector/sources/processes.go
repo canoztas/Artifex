@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // CollectProcesses captures a snapshot of all running processes using

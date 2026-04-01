@@ -10,7 +10,7 @@ import logging
 import sqlite3
 from typing import Any
 
-log = logging.getLogger("pickaxe.timeline")
+log = logging.getLogger("artifex.timeline")
 
 
 def build_timeline(case_id: str, db_path: str) -> int:
@@ -26,7 +26,7 @@ def build_timeline(case_id: str, db_path: str) -> int:
     case_id:
         The case to build the timeline for.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------
@@ -102,7 +102,7 @@ def get_timeline(
     case_id:
         The case to query.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
     cursor:
         Opaque cursor (position in ``timeline_index``) from a previous
         response.  ``None`` starts from the beginning.

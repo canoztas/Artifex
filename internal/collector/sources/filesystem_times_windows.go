@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // populateTimestamps fills in Created and Accessed fields using the native

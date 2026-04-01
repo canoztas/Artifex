@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod tidy:*)",
+      "Bash(go build:*)",
+      "Bash(findstr:*)",
+      "Bash(npm install:*)"
+    ]
+  }
+}

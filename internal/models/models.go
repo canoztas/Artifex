@@ -79,13 +79,14 @@ type YaraRule struct {
 
 // YaraResult stores YARA scan results.
 type YaraResult struct {
-	ID         int64     `json:"id"`
-	CaseID     string    `json:"case_id"`
-	RuleID     string    `json:"rule_id"`
-	RuleName   string    `json:"rule_name"`
-	ArtifactID string    `json:"artifact_id"`
-	Matches    string    `json:"matches"` // JSON array of match details
-	ScannedAt  time.Time `json:"scanned_at"`
+	ID           int64     `json:"id"`
+	CaseID       string    `json:"case_id"`
+	RuleID       string    `json:"rule_id"`
+	RuleName     string    `json:"rule_name"`
+	ArtifactID   string    `json:"artifact_id"`
+	ArtifactPath string    `json:"artifact_path,omitempty"`
+	Matches      string    `json:"matches"` // JSON array of match details
+	ScannedAt    time.Time `json:"scanned_at"`
 }
 
 // ActionProposal is an AI-recommended action for user approval.
@@ -95,7 +96,7 @@ type ActionProposal struct {
 	Type       string     `json:"type"`
 	Title      string     `json:"title"`
 	Rationale  string     `json:"rationale"`
-	Steps      string     `json:"steps"` // JSON array of step descriptions
+	Steps      string     `json:"steps"`  // JSON array of step descriptions
 	Status     string     `json:"status"` // pending, approved, rejected, executed
 	CreatedAt  time.Time  `json:"created_at"`
 	ApprovedAt *time.Time `json:"approved_at,omitempty"`
@@ -229,31 +230,31 @@ type RegistryKeyValue struct {
 
 // FileMetadata for filesystem metadata collection.
 type FileMetadata struct {
-	Path         string `json:"path"`
-	Size         int64  `json:"size"`
-	Created      string `json:"created"`
-	Modified     string `json:"modified"`
-	Accessed     string `json:"accessed"`
-	SHA256       string `json:"sha256,omitempty"`
-	IsDirectory  bool   `json:"is_directory"`
-	Owner        string `json:"owner,omitempty"`
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
+	Created     string `json:"created"`
+	Modified    string `json:"modified"`
+	Accessed    string `json:"accessed"`
+	SHA256      string `json:"sha256,omitempty"`
+	IsDirectory bool   `json:"is_directory"`
+	Owner       string `json:"owner,omitempty"`
 }
 
 // CollectionConfig holds parameters for a collection job.
 type CollectionConfig struct {
-	CaseID          string   `json:"case_id"`
-	Preset          string   `json:"preset"` // standard, deep
-	TimeRangeHours  int      `json:"time_range_hours"`
-	IncludeMemory   bool     `json:"include_memory"`
-	MemoryApproved  bool     `json:"memory_approved"`
-	CustomChannels  []string `json:"custom_channels,omitempty"`
+	CaseID         string   `json:"case_id"`
+	Preset         string   `json:"preset"` // standard, deep
+	TimeRangeHours int      `json:"time_range_hours"`
+	IncludeMemory  bool     `json:"include_memory"`
+	MemoryApproved bool     `json:"memory_approved"`
+	CustomChannels []string `json:"custom_channels,omitempty"`
 }
 
 // Pagination parameters for list queries.
 type PaginationParams struct {
-	Cursor   string `json:"cursor,omitempty"`
-	Limit    int    `json:"limit"`
-	Offset   int    `json:"offset"`
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
 }
 
 // PaginatedResponse wraps a paginated result set.
@@ -266,15 +267,15 @@ type PaginatedResponse struct {
 
 // LLMConfig holds AI provider configuration.
 type LLMConfig struct {
-	Provider          string `json:"provider"` // anthropic, openai
-	APIKey            string `json:"api_key"`
-	Model             string `json:"model"`
-	MaxTokens         int    `json:"max_tokens"`
-	Temperature       float64 `json:"temperature"`
-	TimeoutMS         int    `json:"timeout_ms"`
-	Retries           int    `json:"retries"`
-	RedactionMode     string `json:"redaction_mode"` // off, basic, strict
-	DataHandlingNotice string `json:"data_handling_notice"`
+	Provider           string  `json:"provider"` // anthropic, gemini, openai, deepseek
+	APIKey             string  `json:"api_key"`
+	Model              string  `json:"model"`
+	MaxTokens          int     `json:"max_tokens"`
+	Temperature        float64 `json:"temperature"`
+	TimeoutMS          int     `json:"timeout_ms"`
+	Retries            int     `json:"retries"`
+	RedactionMode      string  `json:"redaction_mode"` // off, basic, strict
+	DataHandlingNotice string  `json:"data_handling_notice"`
 }
 
 // AppConfig is the top-level application configuration.

@@ -5,7 +5,7 @@ package sources
 import (
 	"os"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // populateTimestamps keeps non-Windows builds working with a reasonable

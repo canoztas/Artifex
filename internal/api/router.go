@@ -6,13 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pickaxe/dfir/internal/audit"
-	"github.com/pickaxe/dfir/internal/db"
-	"github.com/pickaxe/dfir/internal/evidence"
-	"github.com/pickaxe/dfir/internal/llm"
+	"github.com/artifex/dfir/internal/audit"
+	"github.com/artifex/dfir/internal/db"
+	"github.com/artifex/dfir/internal/evidence"
+	"github.com/artifex/dfir/internal/llm"
 )
 
-// Server is the HTTP API server for Pickaxe.
+// Server is the HTTP API server for Artifex.
 type Server struct {
 	db           *db.DB
 	store        *evidence.Store
@@ -74,6 +74,7 @@ func (s *Server) registerRoutes() {
 
 	// Timeline
 	s.mux.HandleFunc("GET /api/cases/{caseId}/timeline", s.caseValidation(s.handleGetTimeline))
+	s.mux.HandleFunc("GET /api/cases/{caseId}/timeline/sources", s.caseValidation(s.handleListTimelineSources))
 
 	// Persistence
 	s.mux.HandleFunc("GET /api/cases/{caseId}/persistence", s.caseValidation(s.handleListPersistence))

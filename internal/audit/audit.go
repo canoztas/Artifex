@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // AuditStore defines the interface the audit logger requires for persistence.

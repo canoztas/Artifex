@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // Role constants for chat messages.
@@ -17,10 +17,11 @@ const (
 
 // Message represents a single message in a conversation.
 type Message struct {
-	Role       string      `json:"role"`
-	Content    string      `json:"content"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolName   string     `json:"tool_name,omitempty"`
 }
 
 // ToolCall represents an LLM request to invoke a tool.
@@ -68,11 +69,13 @@ func NewProvider(cfg models.LLMConfig) (Provider, error) {
 	switch cfg.Provider {
 	case "gemini":
 		return NewGeminiProvider(cfg)
+	case "deepseek":
+		return NewDeepSeekProvider(cfg)
 	case "anthropic":
 		return NewAnthropicProvider(cfg)
 	case "openai":
 		return NewOpenAIProvider(cfg)
 	default:
-		return nil, fmt.Errorf("unsupported LLM provider: %q (supported: gemini, anthropic, openai)", cfg.Provider)
+		return nil, fmt.Errorf("unsupported LLM provider: %q (supported: gemini, deepseek, anthropic, openai)", cfg.Provider)
 	}
 }

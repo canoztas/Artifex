@@ -36,7 +36,9 @@ function artifactTypeColor(type: string): string {
     evtx: 'info',
     registry: 'warning',
     prefetch: 'success',
-    mft: 'danger',
+    lnk: 'warning',
+    jumplist_automatic: 'info',
+    jumplist_custom: 'info',
     filesystem: 'neutral',
   }
   return colors[type.toLowerCase()] || 'default'

@@ -20,6 +20,7 @@ func AllTools() []Tool {
 		yaraScanTool(),
 		getPersistenceItemsTool(),
 		getExecutionArtifactsTool(),
+		getRecentActivityTool(),
 		getNetworkSnapshotTool(),
 		listYaraRulesTool(),
 		createYaraRuleTool(),
@@ -48,7 +49,7 @@ func startCollectionTool() Tool {
 				"preset": map[string]interface{}{
 					"type":        "string",
 					"enum":        []string{"standard", "deep"},
-					"description": "Collection preset. 'standard' collects common artifacts (event logs, prefetch, registry). 'deep' adds memory, full MFT, and volume shadow copies.",
+					"description": "Collection preset. 'standard' collects common artifacts (event logs, prefetch, registry). 'deep' adds extended registry collection and optional memory acquisition.",
 				},
 				"time_range_hours": map[string]interface{}{
 					"type":        "integer",
@@ -227,7 +228,7 @@ func searchEventsTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 7: get_event
+// Tool 8: get_event
 // ---------------------------------------------------------------------------
 
 func getEventTool() Tool {
@@ -253,7 +254,7 @@ func getEventTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 8: get_timeline
+// Tool 9: get_timeline
 // ---------------------------------------------------------------------------
 
 func getTimelineTool() Tool {
@@ -295,7 +296,7 @@ func getTimelineTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 9: read_registry_keys
+// Tool 10: read_registry_keys
 // ---------------------------------------------------------------------------
 
 func readRegistryKeysTool() Tool {
@@ -321,7 +322,7 @@ func readRegistryKeysTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 10: search_registry
+// Tool 11: search_registry
 // ---------------------------------------------------------------------------
 
 func searchRegistryTool() Tool {
@@ -351,7 +352,7 @@ func searchRegistryTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 11: yara_scan
+// Tool 12: yara_scan
 // ---------------------------------------------------------------------------
 
 func yaraScanTool() Tool {
@@ -381,7 +382,7 @@ func yaraScanTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 12: get_persistence_items
+// Tool 13: get_persistence_items
 // ---------------------------------------------------------------------------
 
 func getPersistenceItemsTool() Tool {
@@ -403,7 +404,7 @@ func getPersistenceItemsTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 13: get_execution_artifacts
+// Tool 14: get_execution_artifacts
 // ---------------------------------------------------------------------------
 
 func getExecutionArtifactsTool() Tool {
@@ -435,7 +436,44 @@ func getExecutionArtifactsTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 14: get_network_snapshot
+// Tool 15: get_recent_activity
+// ---------------------------------------------------------------------------
+
+func getRecentActivityTool() Tool {
+	return Tool{
+		Name:        "get_recent_activity",
+		Description: "Get parsed recent-activity evidence from Windows shortcut files (.lnk) and Jump Lists. Useful for identifying recently accessed files, launched applications, startup shortcuts, and user shell activity.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"case_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The case ID to get recent activity for.",
+				},
+				"kind": map[string]interface{}{
+					"type":        "string",
+					"enum":        []string{"all", "shortcut", "jumplist"},
+					"description": "Filter to only shortcuts, only Jump Lists, or all recent-activity evidence. Default: all.",
+				},
+				"cursor": map[string]interface{}{
+					"type":        "string",
+					"description": "Pagination cursor from a previous response.",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"minimum":     1,
+					"maximum":     MaxPageSize,
+					"description": "Maximum number of entries to return. Default: 100.",
+				},
+			},
+			"required":             []string{"case_id"},
+			"additionalProperties": false,
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tool 16: get_network_snapshot
 // ---------------------------------------------------------------------------
 
 func getNetworkSnapshotTool() Tool {
@@ -457,7 +495,7 @@ func getNetworkSnapshotTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 15: list_yara_rules
+// Tool 17: list_yara_rules
 // ---------------------------------------------------------------------------
 
 func listYaraRulesTool() Tool {
@@ -479,7 +517,7 @@ func listYaraRulesTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 16: create_yara_rule
+// Tool 18: create_yara_rule
 // ---------------------------------------------------------------------------
 
 func createYaraRuleTool() Tool {
@@ -509,7 +547,7 @@ func createYaraRuleTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 17: get_yara_results
+// Tool 19: get_yara_results
 // ---------------------------------------------------------------------------
 
 func getYaraResultsTool() Tool {
@@ -535,7 +573,7 @@ func getYaraResultsTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 18: recommend_action
+// Tool 20: recommend_action
 // ---------------------------------------------------------------------------
 
 func recommendActionTool() Tool {
@@ -577,7 +615,7 @@ func recommendActionTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 19: get_audit_log
+// Tool 21: get_audit_log
 // ---------------------------------------------------------------------------
 
 func getAuditLogTool() Tool {
@@ -610,7 +648,7 @@ func getAuditLogTool() Tool {
 }
 
 // ---------------------------------------------------------------------------
-// Tool 20: get_process_snapshot
+// Tool 22: get_process_snapshot
 // ---------------------------------------------------------------------------
 
 func getProcessSnapshotTool() Tool {

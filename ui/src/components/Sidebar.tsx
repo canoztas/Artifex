@@ -9,7 +9,6 @@ import {
   ShieldCheck,
   ChevronLeft,
   ChevronRight,
-  Pickaxe,
   LayoutDashboard,
   ClipboardList,
 } from 'lucide-react'
@@ -54,11 +53,11 @@ export default function Sidebar() {
       {/* Brand */}
       <div className="h-14 flex items-center px-4 border-b border-slate-700 gap-3">
         <div className="w-8 h-8 bg-forensic-600 rounded-lg flex items-center justify-center shrink-0">
-          <Pickaxe size={18} className="text-white" />
+          <Search size={18} className="text-white" />
         </div>
         {!collapsed && (
           <span className="text-sm font-semibold text-slate-200 whitespace-nowrap">
-            Pickaxe
+            Artifex
           </span>
         )}
       </div>

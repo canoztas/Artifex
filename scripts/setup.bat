@@ -2,7 +2,7 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 echo ============================================
-echo  Pickaxe DFIR - Initial Setup
+echo  Artifex DFIR - Initial Setup
 echo ============================================
 echo.
 

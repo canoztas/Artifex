@@ -7,7 +7,8 @@ import {
   ChevronDown,
   Filter,
 } from 'lucide-react'
-import { getTimeline } from '../api/client'
+import { getTimeline, listTimelineSources } from '../api/client'
+import { EventSummary, EventStructuredDetails } from '../components/EventEvidence'
 import type { Event } from '../types'
 
 function levelColor(level: Event['level']): string {
@@ -76,6 +77,8 @@ export default function Timeline() {
   // Filters
   const [timeStart, setTimeStart] = useState('')
   const [timeEnd, setTimeEnd] = useState('')
+  const [sourceFilter, setSourceFilter] = useState('')
+  const [sources, setSources] = useState<string[]>([])
   const [showFilters, setShowFilters] = useState(false)
 
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -95,7 +98,8 @@ export default function Timeline() {
           cursor || undefined,
           PAGE_SIZE,
           toApiDateTime(timeStart),
-          toApiDateTime(timeEnd)
+          toApiDateTime(timeEnd),
+          sourceFilter
         )
         if (append) {
           setEvents((prev) => [...prev, ...(data.items ?? [])])
@@ -111,12 +115,36 @@ export default function Timeline() {
         setLoadingMore(false)
       }
     },
-    [caseId, timeStart, timeEnd]
+    [caseId, timeStart, timeEnd, sourceFilter]
   )
 
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    if (!caseId) return
+    const resolvedCaseId = caseId
+    let cancelled = false
+
+    async function loadSources() {
+      try {
+        const data = await listTimelineSources(resolvedCaseId)
+        if (!cancelled) {
+          setSources(data)
+        }
+      } catch {
+        if (!cancelled) {
+          setSources([])
+        }
+      }
+    }
+
+    loadSources()
+    return () => {
+      cancelled = true
+    }
+  }, [caseId])
 
   // Infinite scroll
   useEffect(() => {
@@ -192,10 +220,28 @@ export default function Timeline() {
                 className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-forensic-500"
               />
             </div>
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-slate-400 mb-1">
+                Data Source
+              </label>
+              <select
+                value={sourceFilter}
+                onChange={(e) => setSourceFilter(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-forensic-500"
+              >
+                <option value="">All sources</option>
+                {sources.map((source) => (
+                  <option key={source} value={source}>
+                    {source}
+                  </option>
+                ))}
+              </select>
+            </div>
             <button
               onClick={() => {
                 setTimeStart('')
                 setTimeEnd('')
+                setSourceFilter('')
               }}
               className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 border border-slate-600 rounded-lg hover:bg-slate-700"
             >
@@ -280,9 +326,7 @@ export default function Timeline() {
                               </span>
                             )}
                           </div>
-                          <p className="text-sm text-slate-300 line-clamp-2">
-                            {event.message}
-                          </p>
+                          <EventSummary event={event} />
                         </div>
                         <ChevronDown
                           size={16}
@@ -305,15 +349,16 @@ export default function Timeline() {
                               <span className="text-slate-300">{event.channel}</span>
                             </div>
                           </div>
+                          <EventStructuredDetails event={event} />
                           <div>
-                            <p className="text-xs text-slate-500 mb-1">Full Message:</p>
-                            <p className="text-sm text-slate-300 whitespace-pre-wrap">
-                              {event.message}
-                            </p>
+                              <p className="text-xs text-slate-500 mb-1">Full Message:</p>
+                              <p className="text-sm text-slate-300 whitespace-pre-wrap">
+                                {event.message}
+                              </p>
                           </div>
                           {event.raw_xml && (
                             <div>
-                              <p className="text-xs text-slate-500 mb-1">Raw XML:</p>
+                              <p className="text-xs text-slate-500 mb-1">Raw Data:</p>
                               <pre className="p-3 bg-slate-900 rounded-lg text-xs text-slate-400 font-mono overflow-auto max-h-48">
                                 {event.raw_xml}
                               </pre>

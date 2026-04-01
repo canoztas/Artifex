@@ -10,18 +10,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/artifex/dfir/internal/audit"
+	"github.com/artifex/dfir/internal/collector"
+	"github.com/artifex/dfir/internal/config"
+	"github.com/artifex/dfir/internal/db"
+	"github.com/artifex/dfir/internal/evidence"
+	"github.com/artifex/dfir/internal/models"
 	"github.com/google/uuid"
-	"github.com/pickaxe/dfir/internal/audit"
-	"github.com/pickaxe/dfir/internal/collector"
-	"github.com/pickaxe/dfir/internal/config"
-	"github.com/pickaxe/dfir/internal/db"
-	"github.com/pickaxe/dfir/internal/evidence"
-	"github.com/pickaxe/dfir/internal/models"
 )
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Pickaxe Collector Service starting...")
+	log.Println("Artifex Collector Service starting...")
 
 	cfg, err := config.Load(".")
 	if err != nil {
@@ -33,7 +33,7 @@ func main() {
 		log.Fatal("Security: bind address must be 127.0.0.1")
 	}
 
-	database, err := db.Init(fmt.Sprintf("%s/pickaxe.db", cfg.DataDir))
+	database, err := db.Init(fmt.Sprintf("%s/artifex.db", cfg.DataDir))
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}

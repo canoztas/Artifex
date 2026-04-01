@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // CollectHostMetadata gathers host identification information using safe,

@@ -13,7 +13,7 @@ const shimcacheRegPath = `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\
 // binary file. The ShimCache stores execution metadata and is a key forensic
 // artifact.
 func CollectShimCache() ([]CollectedFile, error) {
-	tmpDir, err := os.MkdirTemp("", "pickaxe-shimcache-*")
+	tmpDir, err := os.MkdirTemp("", "artifex-shimcache-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}

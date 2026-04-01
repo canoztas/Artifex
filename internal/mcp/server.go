@@ -1,4 +1,4 @@
-// Package mcp implements the Model Context Protocol server for the Pickaxe DFIR
+// Package mcp implements the Model Context Protocol server for the Artifex DFIR
 // platform. It exposes forensic investigation tools to AI agents over JSON-RPC
 // 2.0 transported via stdio, following the MCP specification.
 //
@@ -17,21 +17,21 @@ import (
 	"os"
 	"time"
 
-	"github.com/pickaxe/dfir/internal/audit"
-	"github.com/pickaxe/dfir/internal/db"
-	"github.com/pickaxe/dfir/internal/evidence"
+	"github.com/artifex/dfir/internal/audit"
+	"github.com/artifex/dfir/internal/db"
+	"github.com/artifex/dfir/internal/evidence"
 )
 
 // Quota constants enforced on every tool call.
 const (
-	MaxRowsPerCall    = 10000
-	MaxPageSize       = 1000
-	MaxResponseBytes  = 5 * 1024 * 1024 // 5 MB
-	ToolCallTimeout   = 30 * time.Second
-	ServerName        = "pickaxe-dfir"
-	ServerVersion     = "0.1.0"
-	ProtocolVersion   = "2024-11-05"
-	JSONRPCVersion    = "2.0"
+	MaxRowsPerCall   = 10000
+	MaxPageSize      = 1000
+	MaxResponseBytes = 5 * 1024 * 1024 // 5 MB
+	ToolCallTimeout  = 30 * time.Second
+	ServerName       = "artifex-dfir"
+	ServerVersion    = "0.1.0"
+	ProtocolVersion  = "2024-11-05"
+	JSONRPCVersion   = "2.0"
 )
 
 // MCPServer handles MCP JSON-RPC requests over stdio.

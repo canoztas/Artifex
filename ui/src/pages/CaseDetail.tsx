@@ -176,7 +176,7 @@ export default function CaseDetail() {
       </div>
 
       {/* Quick links */}
-      <div className="grid grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         {quickLinks.map((link) => (
           <Link
             key={link.path}

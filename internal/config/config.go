@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // DefaultConfig returns an AppConfig populated with safe defaults.
@@ -70,6 +70,12 @@ func Validate(cfg models.AppConfig) error {
 
 	if cfg.DataDir == "" {
 		return fmt.Errorf("data_dir must not be empty")
+	}
+
+	switch cfg.LLM.Provider {
+	case "", "anthropic", "gemini", "openai", "deepseek":
+	default:
+		return fmt.Errorf("llm.provider must be one of anthropic, gemini, openai, deepseek, or empty, got %q", cfg.LLM.Provider)
 	}
 
 	return nil

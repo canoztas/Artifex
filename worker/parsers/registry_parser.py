@@ -18,7 +18,7 @@ from typing import Any
 import zstandard
 from Registry import Registry
 
-log = logging.getLogger("pickaxe.parser.registry")
+log = logging.getLogger("artifex.parser.registry")
 
 _BATCH_SIZE = 500
 
@@ -192,7 +192,7 @@ def parse_registry_hive(
     blob_path:
         Path to the (possibly zstd-compressed) hive file.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------
@@ -242,7 +242,7 @@ def extract_persistence_keys(
     blob_path:
         Path to the (possibly zstd-compressed) hive file.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------

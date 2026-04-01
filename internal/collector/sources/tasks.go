@@ -4,7 +4,7 @@ import (
 	"encoding/csv"
 	"strings"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // CollectScheduledTasks captures all scheduled tasks using schtasks.exe with

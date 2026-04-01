@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 
 echo ============================================
-echo  Pickaxe DFIR - Build Script (Windows)
+echo  Artifex DFIR - Build Script (Windows)
 echo ============================================
 echo.
 
@@ -25,7 +25,7 @@ if %ERRORLEVEL% neq 0 (
 :: Build Go services
 echo [1/3] Building Go services...
 echo   Building API server...
-go build -o bin\pickaxe-api.exe .\cmd\api\
+go build -o bin\artifex-api.exe .\cmd\api\
 if %ERRORLEVEL% neq 0 (
     echo   FAILED: API server build failed
     exit /b 1
@@ -33,7 +33,7 @@ if %ERRORLEVEL% neq 0 (
 echo   OK
 
 echo   Building Collector service...
-go build -o bin\pickaxe-collector.exe .\cmd\collector\
+go build -o bin\artifex-collector.exe .\cmd\collector\
 if %ERRORLEVEL% neq 0 (
     echo   FAILED: Collector build failed
     exit /b 1
@@ -41,7 +41,7 @@ if %ERRORLEVEL% neq 0 (
 echo   OK
 
 echo   Building MCP server...
-go build -o bin\pickaxe-mcp.exe .\cmd\mcp\
+go build -o bin\artifex-mcp.exe .\cmd\mcp\
 if %ERRORLEVEL% neq 0 (
     echo   FAILED: MCP server build failed
     exit /b 1

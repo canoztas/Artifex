@@ -2,7 +2,7 @@
 
 Decompresses a zstd-compressed EVTX blob, walks every record with
 python-evtx, extracts normalised fields, and batch-inserts them into the
-Pickaxe ``events`` table.
+Artifex ``events`` table.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from xml.etree import ElementTree
 import zstandard
 import Evtx.Evtx as evtx
 
-log = logging.getLogger("pickaxe.parser.evtx")
+log = logging.getLogger("artifex.parser.evtx")
 
 # XML namespace used inside EVTX records.
 _NS = "{http://schemas.microsoft.com/win/2004/08/events/event}"
@@ -151,13 +151,13 @@ def parse_evtx(
     Parameters
     ----------
     artifact_id:
-        Unique identifier of the artifact in the Pickaxe database.
+        Unique identifier of the artifact in the Artifex database.
     case_id:
         Case the artifact belongs to.
     blob_path:
         Path to the (possibly zstd-compressed) EVTX file on disk.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------

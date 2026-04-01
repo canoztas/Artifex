@@ -3,17 +3,19 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/artifex/dfir/internal/llm"
+	"github.com/artifex/dfir/internal/models"
 	"github.com/google/uuid"
-	"github.com/pickaxe/dfir/internal/llm"
-	"github.com/pickaxe/dfir/internal/models"
 )
 
-const dfirSystemPrompt = `You are Pickaxe, an expert DFIR (Digital Forensics and Incident Response) analyst AI assistant.
+const dfirSystemPrompt = `You are Artifex, an expert DFIR (Digital Forensics and Incident Response) analyst AI assistant.
 
 You help investigators analyze Windows security incidents by examining collected evidence artifacts. You have access to tools that let you:
 - Browse and search collected artifacts (event logs, registry keys, prefetch files, etc.)
@@ -129,6 +131,8 @@ func (s *Server) buildToolExecutor(caseID string) llm.ToolExecutor {
 			return s.toolGetProcessSnapshot(caseID)
 		case "get_execution_artifacts":
 			return s.toolGetExecutionArtifacts(caseID, args)
+		case "get_recent_activity":
+			return s.toolGetRecentActivity(caseID, args)
 		case "read_registry_keys":
 			return s.toolReadRegistry(caseID, args)
 		case "search_registry":
@@ -290,14 +294,166 @@ func (s *Server) toolGetProcessSnapshot(caseID string) (string, error) {
 }
 
 func (s *Server) toolGetExecutionArtifacts(caseID string, args map[string]interface{}) (string, error) {
-	artifacts, _, _ := s.db.ListArtifacts(caseID, 100, 0)
-	var execArtifacts []models.Artifact
-	for _, a := range artifacts {
-		if a.Type == "prefetch" || a.Type == "amcache" || a.Type == "shimcache" {
-			execArtifacts = append(execArtifacts, a)
+	if err := s.ensureCaseEventsIndexed(caseID); err != nil {
+		if errors.Is(err, errWorkerUnavailable) {
+			log.Printf("[api] execution artifact indexing skipped for case %s: %v", caseID, err)
+		} else {
+			return "", err
 		}
 	}
-	return marshalResult(execArtifacts)
+
+	limit := getIntArg(args, "limit", 100)
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := getIntArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	if err := s.db.Conn().QueryRow(
+		`SELECT COUNT(*) FROM events
+		 WHERE case_id = ? AND source IN ('prefetch','shimcache','amcache','userassist','bam')`,
+		caseID,
+	).Scan(&total); err != nil {
+		return "", err
+	}
+
+	rows, err := s.db.Conn().Query(
+		`SELECT id, case_id, artifact_id, timestamp, source, event_id,
+		 level, channel, provider, computer, message, raw_data
+		 FROM events WHERE case_id = ?
+		 AND source IN ('prefetch','shimcache','amcache','userassist','bam')
+		 ORDER BY timestamp ASC, id ASC
+		 LIMIT ? OFFSET ?`,
+		caseID, limit, offset,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var events []models.Event
+	for rows.Next() {
+		var event models.Event
+		var ts string
+		if err := rows.Scan(
+			&event.ID, &event.CaseID, &event.ArtifactID, &ts, &event.Source, &event.EventID,
+			&event.Level, &event.Channel, &event.Provider, &event.Computer, &event.Message, &event.RawData,
+		); err != nil {
+			return "", err
+		}
+		event.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+
+	return marshalResult(map[string]interface{}{
+		"events":      events,
+		"total":       total,
+		"has_more":    offset+len(events) < total,
+		"next_offset": offset + len(events),
+	})
+}
+
+func (s *Server) toolGetRecentActivity(caseID string, args map[string]interface{}) (string, error) {
+	if err := s.ensureCaseEventsIndexed(caseID); err != nil {
+		if errors.Is(err, errWorkerUnavailable) {
+			log.Printf("[api] recent activity indexing skipped for case %s: %v", caseID, err)
+		} else {
+			return "", err
+		}
+	}
+
+	kind := strings.ToLower(getStringArg(args, "kind"))
+	if kind == "" {
+		kind = "all"
+	}
+
+	var sourceClause string
+	switch kind {
+	case "all":
+		sourceClause = "source IN ('lnk','lnk_recent','lnk_startup','lnk_desktop','jumplist','jumplist_automatic','jumplist_custom')"
+	case "shortcut":
+		sourceClause = "source IN ('lnk','lnk_recent','lnk_startup','lnk_desktop')"
+	case "jumplist":
+		sourceClause = "source IN ('jumplist','jumplist_automatic','jumplist_custom')"
+	default:
+		return "", fmt.Errorf("kind must be one of: all, shortcut, jumplist")
+	}
+
+	limit := getIntArg(args, "limit", 100)
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := getIntArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+
+	rows, err := s.db.Conn().Query(
+		fmt.Sprintf(`SELECT id, case_id, artifact_id, timestamp, source, event_id,
+		 level, channel, provider, computer, message, raw_data
+		 FROM events WHERE case_id = ? AND %s
+		 ORDER BY timestamp ASC, id ASC
+		 LIMIT ? OFFSET ?`, sourceClause),
+		caseID, limit, offset,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var results []map[string]interface{}
+	for rows.Next() {
+		var event models.Event
+		var ts string
+		if err := rows.Scan(
+			&event.ID, &event.CaseID, &event.ArtifactID, &ts, &event.Source, &event.EventID,
+			&event.Level, &event.Channel, &event.Provider, &event.Computer, &event.Message, &event.RawData,
+		); err != nil {
+			return "", err
+		}
+		event.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+
+		entry := map[string]interface{}{
+			"id":          event.ID,
+			"artifact_id": event.ArtifactID,
+			"timestamp":   event.Timestamp,
+			"source":      event.Source,
+			"message":     event.Message,
+		}
+		if strings.TrimSpace(event.RawData) != "" {
+			var details map[string]interface{}
+			if err := json.Unmarshal([]byte(event.RawData), &details); err == nil {
+				entry["details"] = details
+			} else {
+				entry["raw_data"] = event.RawData
+			}
+		}
+		results = append(results, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+
+	var total int
+	if err := s.db.Conn().QueryRow(
+		fmt.Sprintf(`SELECT COUNT(*) FROM events WHERE case_id = ? AND %s`, sourceClause),
+		caseID,
+	).Scan(&total); err != nil {
+		return "", err
+	}
+
+	return marshalResult(map[string]interface{}{
+		"events":      results,
+		"total":       total,
+		"has_more":    offset+len(results) < total,
+		"next_offset": offset + len(results),
+	})
 }
 
 func (s *Server) toolReadRegistry(caseID string, args map[string]interface{}) (string, error) {
@@ -413,8 +569,8 @@ func (s *Server) toolRecommendAction(caseID string, args map[string]interface{})
 		fmt.Sprintf("proposed: %s - %s", actionType, title))
 
 	return marshalResult(map[string]interface{}{
-		"status":  "created",
-		"message": "Action proposal created. The investigator must review and approve it before execution.",
+		"status":   "created",
+		"message":  "Action proposal created. The investigator must review and approve it before execution.",
 		"proposal": proposal,
 	})
 }
@@ -505,6 +661,15 @@ func (s *Server) buildAgentTools() []llm.ToolDefinition {
 			Name:        "get_execution_artifacts",
 			Description: "Get parsed execution evidence from Prefetch, AmCache, and ShimCache. Shows what programs have been executed on the system.",
 			Parameters: jsonSchema(map[string]propDef{
+				"limit":  {Type: "integer", Desc: "Max results"},
+				"offset": {Type: "integer", Desc: "Pagination offset"},
+			}, nil),
+		},
+		{
+			Name:        "get_recent_activity",
+			Description: "Get parsed recent-activity evidence from shortcut files and Jump Lists. Useful for identifying recently accessed files, launched applications, and startup shortcut behavior.",
+			Parameters: jsonSchema(map[string]propDef{
+				"kind":   {Type: "string", Desc: "Optional filter: all, shortcut, or jumplist"},
 				"limit":  {Type: "integer", Desc: "Max results"},
 				"offset": {Type: "integer", Desc: "Pagination offset"},
 			}, nil),

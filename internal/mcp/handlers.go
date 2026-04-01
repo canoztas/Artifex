@@ -7,10 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/artifex/dfir/internal/models"
 	"github.com/google/uuid"
-	"github.com/pickaxe/dfir/internal/models"
 )
 
 // executeTool dispatches a named tool call to its handler. Every handler
@@ -44,6 +45,8 @@ func (s *MCPServer) executeTool(ctx context.Context, name string, args map[strin
 		return s.handleGetPersistenceItems(ctx, args)
 	case "get_execution_artifacts":
 		return s.handleGetExecutionArtifacts(ctx, args)
+	case "get_recent_activity":
+		return s.handleGetRecentActivity(ctx, args)
 	case "get_network_snapshot":
 		return s.handleGetNetworkSnapshot(ctx, args)
 	case "list_yara_rules":
@@ -114,6 +117,33 @@ func optionalInt(args map[string]interface{}, key string, defaultVal, minVal, ma
 	return n
 }
 
+func normalizeEventForTool(event models.Event) map[string]interface{} {
+	result := map[string]interface{}{
+		"id":          event.ID,
+		"case_id":     event.CaseID,
+		"artifact_id": event.ArtifactID,
+		"timestamp":   event.Timestamp,
+		"source":      event.Source,
+		"event_id":    event.EventID,
+		"level":       event.Level,
+		"channel":     event.Channel,
+		"provider":    event.Provider,
+		"computer":    event.Computer,
+		"message":     event.Message,
+	}
+
+	if strings.TrimSpace(event.RawData) != "" {
+		var details map[string]interface{}
+		if err := json.Unmarshal([]byte(event.RawData), &details); err == nil {
+			result["details"] = details
+		} else {
+			result["raw_data"] = event.RawData
+		}
+	}
+
+	return result
+}
+
 func requireInt(args map[string]interface{}, key string) (int, error) {
 	v, ok := args[key]
 	if !ok {
@@ -158,6 +188,77 @@ func clampLimit(limit int) int {
 	return limit
 }
 
+func (s *MCPServer) latestArtifactByType(caseID string, artifactTypes ...string) (*models.Artifact, error) {
+	if len(artifactTypes) == 0 {
+		return nil, fmt.Errorf("no artifact types provided")
+	}
+
+	artifacts, _, err := s.db.ListArtifacts(caseID, MaxRowsPerCall, 0)
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+
+	typeSet := make(map[string]struct{}, len(artifactTypes))
+	for _, artifactType := range artifactTypes {
+		typeSet[artifactType] = struct{}{}
+	}
+
+	for _, artifact := range artifacts {
+		if _, ok := typeSet[artifact.Type]; ok {
+			artifactCopy := artifact
+			return &artifactCopy, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no matching artifact found")
+}
+
+func (s *MCPServer) loadLatestArtifactJSON(caseID string, target interface{}, artifactTypes ...string) error {
+	artifact, err := s.latestArtifactByType(caseID, artifactTypes...)
+	if err != nil {
+		return err
+	}
+
+	data, err := s.store.Retrieve(artifact.CaseID, artifact.SHA256)
+	if err != nil {
+		return fmt.Errorf("retrieve artifact %s: %w", artifact.ID, err)
+	}
+
+	if err := json.Unmarshal(data, target); err != nil {
+		return fmt.Errorf("decode artifact %s: %w", artifact.ID, err)
+	}
+
+	return nil
+}
+
+func (s *MCPServer) loadRegistryValues(caseID string) ([]models.RegistryKeyValue, error) {
+	artifacts, _, err := s.db.ListArtifacts(caseID, MaxRowsPerCall, 0)
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+
+	values := make([]models.RegistryKeyValue, 0)
+	for _, artifact := range artifacts {
+		if artifact.Type != "registry_persistence" && artifact.Type != "extended_registry" {
+			continue
+		}
+
+		data, err := s.store.Retrieve(artifact.CaseID, artifact.SHA256)
+		if err != nil {
+			continue
+		}
+
+		var keys []models.RegistryKeyValue
+		if err := json.Unmarshal(data, &keys); err != nil {
+			continue
+		}
+
+		values = append(values, keys...)
+	}
+
+	return values, nil
+}
+
 // ---------------------------------------------------------------------------
 // Tool 1: start_collection
 // ---------------------------------------------------------------------------
@@ -176,7 +277,7 @@ func (s *MCPServer) handleStartCollection(ctx context.Context, args map[string]i
 	}
 	timeRangeHours := optionalInt(args, "time_range_hours", 72, 1, 8760)
 
-	// Build the collection config and POST to the collector API.
+	// Build the collection config and POST to the main API.
 	collectionReq := models.CollectionConfig{
 		CaseID:         caseID,
 		Preset:         preset,
@@ -187,7 +288,7 @@ func (s *MCPServer) handleStartCollection(ctx context.Context, args map[string]i
 		return errorResult(fmt.Sprintf("marshal collection request: %v", err))
 	}
 
-	url := fmt.Sprintf("%s/api/v1/collections", s.apiURL)
+	url := fmt.Sprintf("%s/api/cases/%s/collections", s.apiURL, caseID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return errorResult(fmt.Sprintf("create HTTP request: %v", err))
@@ -197,17 +298,17 @@ func (s *MCPServer) handleStartCollection(ctx context.Context, args map[string]i
 	client := &http.Client{Timeout: ToolCallTimeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return errorResult(fmt.Sprintf("collector API request failed: %v", err))
+		return errorResult(fmt.Sprintf("API request failed: %v", err))
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return errorResult(fmt.Sprintf("collector API returned status %d", resp.StatusCode))
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		return errorResult(fmt.Sprintf("API returned status %d", resp.StatusCode))
 	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return errorResult(fmt.Sprintf("decode collector response: %v", err))
+		return errorResult(fmt.Sprintf("decode API response: %v", err))
 	}
 
 	// Audit log the collection start.
@@ -338,7 +439,10 @@ func (s *MCPServer) handleListEventSources(ctx context.Context, args map[string]
 	rows, err := s.db.Conn().QueryContext(ctx,
 		`SELECT source, channel, COUNT(*) as event_count,
 			MIN(timestamp) as earliest, MAX(timestamp) as latest
-			FROM events WHERE case_id = ? GROUP BY source, channel ORDER BY source, channel`,
+			FROM events
+			WHERE case_id = ? AND source NOT LIKE 'mft%' COLLATE NOCASE
+			GROUP BY source, channel
+			ORDER BY source, channel`,
 		caseID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("list event sources: %v", err))
@@ -346,11 +450,11 @@ func (s *MCPServer) handleListEventSources(ctx context.Context, args map[string]
 	defer rows.Close()
 
 	type eventSource struct {
-		Source     string `json:"source"`
-		Channel   string `json:"channel"`
-		Count     int    `json:"event_count"`
-		Earliest  string `json:"earliest"`
-		Latest    string `json:"latest"`
+		Source   string `json:"source"`
+		Channel  string `json:"channel"`
+		Count    int    `json:"event_count"`
+		Earliest string `json:"earliest"`
+		Latest   string `json:"latest"`
 	}
 	var sources []eventSource
 	for rows.Next() {
@@ -390,7 +494,8 @@ func (s *MCPServer) handleSearchEvents(ctx context.Context, args map[string]inte
 		e.level, e.channel, e.provider, e.computer, e.message
 		FROM events e
 		JOIN events_fts f ON e.id = f.rowid
-		WHERE e.case_id = ? AND events_fts MATCH ?`
+		WHERE e.case_id = ? AND events_fts MATCH ?
+		AND e.source NOT LIKE 'mft%' COLLATE NOCASE`
 	sqlArgs := []interface{}{caseID, query}
 
 	if timeStart != "" {
@@ -442,7 +547,7 @@ func (s *MCPServer) handleSearchEvents(ctx context.Context, args map[string]inte
 }
 
 // ---------------------------------------------------------------------------
-// Tool 7: get_event
+// Tool 8: get_event
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleGetEvent(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -486,7 +591,8 @@ func (s *MCPServer) handleGetTimeline(ctx context.Context, args map[string]inter
 
 	sqlQuery := `SELECT id, case_id, artifact_id, timestamp, source, event_id, level,
 		channel, provider, computer, message
-		FROM events WHERE case_id = ?`
+		FROM events
+		WHERE case_id = ? AND source NOT LIKE 'mft%' COLLATE NOCASE`
 	sqlArgs := []interface{}{caseID}
 
 	if timeStart != "" {
@@ -551,28 +657,23 @@ func (s *MCPServer) handleReadRegistryKeys(ctx context.Context, args map[string]
 		return errorResult(err.Error())
 	}
 
-	rows, err := s.db.Conn().QueryContext(ctx,
-		`SELECT path, name, type, data, modified FROM registry_entries
-		WHERE case_id = ? AND path = ? ORDER BY name ASC LIMIT ?`,
-		caseID, path, MaxPageSize)
+	keys, err := s.loadRegistryValues(caseID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("read registry keys: %v", err))
 	}
-	defer rows.Close()
 
-	var keys []models.RegistryKeyValue
-	for rows.Next() {
-		var k models.RegistryKeyValue
-		if err := rows.Scan(&k.Path, &k.Name, &k.Type, &k.Data, &k.Modified); err != nil {
-			return errorResult(fmt.Sprintf("scan registry key: %v", err))
+	matching := make([]models.RegistryKeyValue, 0)
+	needle := strings.ToLower(path)
+	for _, key := range keys {
+		if key.Path == path || strings.Contains(strings.ToLower(key.Path), needle) {
+			matching = append(matching, key)
 		}
-		keys = append(keys, k)
 	}
 
 	_ = s.audit.Log(caseID, "agent", "read_registry_keys", "read_registry_keys",
-		fmt.Sprintf("path=%s returned=%d", path, len(keys)))
+		fmt.Sprintf("path=%s returned=%d", path, len(matching)))
 
-	return textResult(keys)
+	return textResult(matching)
 }
 
 // ---------------------------------------------------------------------------
@@ -593,32 +694,32 @@ func (s *MCPServer) handleSearchRegistry(ctx context.Context, args map[string]in
 		return errorResult(err.Error())
 	}
 
-	likePath := rootPath + "%"
-	likePattern := "%" + pattern + "%"
-
-	rows, err := s.db.Conn().QueryContext(ctx,
-		`SELECT path, name, type, data, modified FROM registry_entries
-		WHERE case_id = ? AND path LIKE ? AND (name LIKE ? OR data LIKE ?)
-		ORDER BY path, name ASC LIMIT ?`,
-		caseID, likePath, likePattern, likePattern, MaxPageSize)
+	keys, err := s.loadRegistryValues(caseID)
 	if err != nil {
 		return errorResult(fmt.Sprintf("search registry: %v", err))
 	}
-	defer rows.Close()
 
-	var keys []models.RegistryKeyValue
-	for rows.Next() {
-		var k models.RegistryKeyValue
-		if err := rows.Scan(&k.Path, &k.Name, &k.Type, &k.Data, &k.Modified); err != nil {
-			return errorResult(fmt.Sprintf("scan registry key: %v", err))
+	rootNeedle := strings.ToLower(rootPath)
+	patternNeedle := strings.ToLower(pattern)
+	results := make([]models.RegistryKeyValue, 0)
+	for _, key := range keys {
+		if rootNeedle != "" && !strings.HasPrefix(strings.ToLower(key.Path), rootNeedle) {
+			continue
 		}
-		keys = append(keys, k)
+		if strings.Contains(strings.ToLower(key.Path), patternNeedle) ||
+			strings.Contains(strings.ToLower(key.Name), patternNeedle) ||
+			strings.Contains(strings.ToLower(key.Data), patternNeedle) {
+			results = append(results, key)
+			if len(results) >= MaxPageSize {
+				break
+			}
+		}
 	}
 
 	_ = s.audit.Log(caseID, "agent", "search_registry", "search_registry",
-		fmt.Sprintf("root_path=%s pattern=%s returned=%d", rootPath, pattern, len(keys)))
+		fmt.Sprintf("root_path=%s pattern=%s returned=%d", rootPath, pattern, len(results)))
 
-	return textResult(keys)
+	return textResult(results)
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +769,7 @@ func (s *MCPServer) handleYaraScan(ctx context.Context, args map[string]interfac
 		return errorResult(fmt.Sprintf("marshal scan request: %v", err))
 	}
 
-	url := fmt.Sprintf("%s/api/v1/yara/scan", s.apiURL)
+	url := fmt.Sprintf("%s/api/cases/%s/yara/scan", s.apiURL, caseID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return errorResult(fmt.Sprintf("create HTTP request: %v", err))
@@ -683,7 +784,7 @@ func (s *MCPServer) handleYaraScan(ctx context.Context, args map[string]interfac
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		return errorResult(fmt.Sprintf("worker API returned status %d", resp.StatusCode))
+		return errorResult(fmt.Sprintf("API returned status %d", resp.StatusCode))
 	}
 
 	var result map[string]interface{}
@@ -774,7 +875,74 @@ func (s *MCPServer) handleGetExecutionArtifacts(ctx context.Context, args map[st
 }
 
 // ---------------------------------------------------------------------------
-// Tool 14: get_network_snapshot
+// Tool 14: get_recent_activity
+// ---------------------------------------------------------------------------
+
+func (s *MCPServer) handleGetRecentActivity(ctx context.Context, args map[string]interface{}) ToolResult {
+	caseID, err := requireString(args, "case_id")
+	if err != nil {
+		return errorResult(err.Error())
+	}
+	kind := optionalString(args, "kind", "all")
+	limit := clampLimit(optionalInt(args, "limit", 100, 1, MaxPageSize))
+	offset := optionalInt(args, "cursor", 0, 0, MaxRowsPerCall)
+
+	var sourceClause string
+	switch kind {
+	case "all":
+		sourceClause = "source IN ('lnk','lnk_recent','lnk_startup','lnk_desktop','jumplist','jumplist_automatic','jumplist_custom')"
+	case "shortcut":
+		sourceClause = "source IN ('lnk','lnk_recent','lnk_startup','lnk_desktop')"
+	case "jumplist":
+		sourceClause = "source IN ('jumplist','jumplist_automatic','jumplist_custom')"
+	default:
+		return errorResult("kind must be one of: all, shortcut, jumplist")
+	}
+
+	rows, err := s.db.Conn().QueryContext(ctx,
+		fmt.Sprintf(`SELECT id, case_id, artifact_id, timestamp, source, event_id, level,
+			channel, provider, computer, message, raw_data
+			FROM events WHERE case_id = ? AND %s
+			ORDER BY timestamp ASC, id ASC LIMIT ? OFFSET ?`, sourceClause),
+		caseID, limit+1, offset)
+	if err != nil {
+		return errorResult(fmt.Sprintf("get recent activity: %v", err))
+	}
+	defer rows.Close()
+
+	var events []map[string]interface{}
+	for rows.Next() {
+		var ev models.Event
+		var ts string
+		if err := rows.Scan(&ev.ID, &ev.CaseID, &ev.ArtifactID, &ts, &ev.Source,
+			&ev.EventID, &ev.Level, &ev.Channel, &ev.Provider, &ev.Computer, &ev.Message, &ev.RawData); err != nil {
+			return errorResult(fmt.Sprintf("scan recent activity: %v", err))
+		}
+		ev.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		events = append(events, normalizeEventForTool(ev))
+	}
+
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+	nextCursor := ""
+	if hasMore {
+		nextCursor = fmt.Sprintf("%d", offset+limit)
+	}
+
+	_ = s.audit.Log(caseID, "agent", "get_recent_activity", "get_recent_activity",
+		fmt.Sprintf("kind=%s limit=%d returned=%d", kind, limit, len(events)))
+
+	return textResult(map[string]interface{}{
+		"data":        events,
+		"next_cursor": nextCursor,
+		"has_more":    hasMore,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tool 15: get_network_snapshot
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleGetNetworkSnapshot(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -783,68 +951,9 @@ func (s *MCPServer) handleGetNetworkSnapshot(ctx context.Context, args map[strin
 		return errorResult(err.Error())
 	}
 
-	snapshot := models.NetworkSnapshot{}
-
-	// Connections.
-	connRows, err := s.db.Conn().QueryContext(ctx,
-		`SELECT protocol, local_addr, local_port, remote_addr, remote_port, state, pid, process_name
-		FROM network_connections WHERE case_id = ? LIMIT ?`, caseID, MaxRowsPerCall)
-	if err != nil {
-		return errorResult(fmt.Sprintf("get network connections: %v", err))
-	}
-	defer connRows.Close()
-	for connRows.Next() {
-		var c models.NetworkConnection
-		if err := connRows.Scan(&c.Protocol, &c.LocalAddr, &c.LocalPort, &c.RemoteAddr,
-			&c.RemotePort, &c.State, &c.PID, &c.ProcessName); err != nil {
-			return errorResult(fmt.Sprintf("scan connection: %v", err))
-		}
-		snapshot.Connections = append(snapshot.Connections, c)
-	}
-
-	// DNS cache.
-	dnsRows, err := s.db.Conn().QueryContext(ctx,
-		`SELECT name, type, ttl, record FROM dns_cache WHERE case_id = ? LIMIT ?`, caseID, MaxRowsPerCall)
-	if err != nil {
-		return errorResult(fmt.Sprintf("get dns cache: %v", err))
-	}
-	defer dnsRows.Close()
-	for dnsRows.Next() {
-		var d models.DNSCacheEntry
-		if err := dnsRows.Scan(&d.Name, &d.Type, &d.TTL, &d.Record); err != nil {
-			return errorResult(fmt.Sprintf("scan dns entry: %v", err))
-		}
-		snapshot.DNSCache = append(snapshot.DNSCache, d)
-	}
-
-	// ARP table.
-	arpRows, err := s.db.Conn().QueryContext(ctx,
-		`SELECT interface, ip_address, mac_address, type FROM arp_entries WHERE case_id = ? LIMIT ?`, caseID, MaxRowsPerCall)
-	if err != nil {
-		return errorResult(fmt.Sprintf("get arp table: %v", err))
-	}
-	defer arpRows.Close()
-	for arpRows.Next() {
-		var a models.ARPEntry
-		if err := arpRows.Scan(&a.Interface, &a.IPAddress, &a.MACAddress, &a.Type); err != nil {
-			return errorResult(fmt.Sprintf("scan arp entry: %v", err))
-		}
-		snapshot.ARPTable = append(snapshot.ARPTable, a)
-	}
-
-	// Routes.
-	routeRows, err := s.db.Conn().QueryContext(ctx,
-		`SELECT destination, netmask, gateway, interface, metric FROM routes WHERE case_id = ? LIMIT ?`, caseID, MaxRowsPerCall)
-	if err != nil {
-		return errorResult(fmt.Sprintf("get routes: %v", err))
-	}
-	defer routeRows.Close()
-	for routeRows.Next() {
-		var r models.RouteEntry
-		if err := routeRows.Scan(&r.Destination, &r.Netmask, &r.Gateway, &r.Interface, &r.Metric); err != nil {
-			return errorResult(fmt.Sprintf("scan route: %v", err))
-		}
-		snapshot.Routes = append(snapshot.Routes, r)
+	var snapshot models.NetworkSnapshot
+	if err := s.loadLatestArtifactJSON(caseID, &snapshot, "network_snapshot"); err != nil {
+		return errorResult(fmt.Sprintf("get network snapshot: %v", err))
 	}
 
 	_ = s.audit.Log(caseID, "agent", "get_network_snapshot", "get_network_snapshot",
@@ -855,7 +964,7 @@ func (s *MCPServer) handleGetNetworkSnapshot(ctx context.Context, args map[strin
 }
 
 // ---------------------------------------------------------------------------
-// Tool 15: list_yara_rules
+// Tool 16: list_yara_rules
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleListYaraRules(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -876,7 +985,7 @@ func (s *MCPServer) handleListYaraRules(ctx context.Context, args map[string]int
 }
 
 // ---------------------------------------------------------------------------
-// Tool 16: create_yara_rule
+// Tool 17: create_yara_rule
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleCreateYaraRule(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -913,7 +1022,7 @@ func (s *MCPServer) handleCreateYaraRule(ctx context.Context, args map[string]in
 }
 
 // ---------------------------------------------------------------------------
-// Tool 17: get_yara_results
+// Tool 18: get_yara_results
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleGetYaraResults(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -938,7 +1047,7 @@ func (s *MCPServer) handleGetYaraResults(ctx context.Context, args map[string]in
 }
 
 // ---------------------------------------------------------------------------
-// Tool 18: recommend_action
+// Tool 19: recommend_action
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleRecommendAction(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -1000,7 +1109,7 @@ func (s *MCPServer) handleRecommendAction(ctx context.Context, args map[string]i
 }
 
 // ---------------------------------------------------------------------------
-// Tool 19: get_audit_log
+// Tool 20: get_audit_log
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleGetAuditLog(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -1025,7 +1134,7 @@ func (s *MCPServer) handleGetAuditLog(ctx context.Context, args map[string]inter
 }
 
 // ---------------------------------------------------------------------------
-// Tool 20: get_process_snapshot
+// Tool 21: get_process_snapshot
 // ---------------------------------------------------------------------------
 
 func (s *MCPServer) handleGetProcessSnapshot(ctx context.Context, args map[string]interface{}) ToolResult {
@@ -1042,63 +1151,23 @@ func (s *MCPServer) handleGetProcessSnapshot(ctx context.Context, args map[strin
 
 	switch snapshotType {
 	case "processes":
-		rows, qErr := s.db.Conn().QueryContext(ctx,
-			`SELECT pid, ppid, name, image_path, command_line, user_context,
-				start_time, session_id, integrity_level
-				FROM processes WHERE case_id = ? ORDER BY pid ASC LIMIT ?`,
-			caseID, MaxRowsPerCall)
-		if qErr != nil {
-			return errorResult(fmt.Sprintf("get processes: %v", qErr))
-		}
-		defer rows.Close()
 		var procs []models.ProcessInfo
-		for rows.Next() {
-			var p models.ProcessInfo
-			if err := rows.Scan(&p.PID, &p.PPID, &p.Name, &p.ImagePath, &p.CommandLine,
-				&p.UserContext, &p.StartTime, &p.SessionID, &p.IntegrityLevel); err != nil {
-				return errorResult(fmt.Sprintf("scan process: %v", err))
-			}
-			procs = append(procs, p)
+		if err := s.loadLatestArtifactJSON(caseID, &procs, "process_snapshot"); err != nil {
+			return errorResult(fmt.Sprintf("get processes: %v", err))
 		}
 		data = procs
 
 	case "services":
-		rows, qErr := s.db.Conn().QueryContext(ctx,
-			`SELECT name, display_name, binary_path, startup_type, current_state, service_account
-				FROM services WHERE case_id = ? ORDER BY name ASC LIMIT ?`,
-			caseID, MaxRowsPerCall)
-		if qErr != nil {
-			return errorResult(fmt.Sprintf("get services: %v", qErr))
-		}
-		defer rows.Close()
 		var svcs []models.ServiceInfo
-		for rows.Next() {
-			var svc models.ServiceInfo
-			if err := rows.Scan(&svc.Name, &svc.DisplayName, &svc.BinaryPath, &svc.StartupType,
-				&svc.CurrentState, &svc.ServiceAccount); err != nil {
-				return errorResult(fmt.Sprintf("scan service: %v", err))
-			}
-			svcs = append(svcs, svc)
+		if err := s.loadLatestArtifactJSON(caseID, &svcs, "service_snapshot"); err != nil {
+			return errorResult(fmt.Sprintf("get services: %v", err))
 		}
 		data = svcs
 
 	case "tasks":
-		rows, qErr := s.db.Conn().QueryContext(ctx,
-			`SELECT name, path, triggers, actions, run_as_user, last_run_time, status
-				FROM scheduled_tasks WHERE case_id = ? ORDER BY name ASC LIMIT ?`,
-			caseID, MaxRowsPerCall)
-		if qErr != nil {
-			return errorResult(fmt.Sprintf("get scheduled tasks: %v", qErr))
-		}
-		defer rows.Close()
 		var tasks []models.ScheduledTaskInfo
-		for rows.Next() {
-			var t models.ScheduledTaskInfo
-			if err := rows.Scan(&t.Name, &t.Path, &t.Triggers, &t.Actions, &t.RunAsUser,
-				&t.LastRunTime, &t.Status); err != nil {
-				return errorResult(fmt.Sprintf("scan task: %v", err))
-			}
-			tasks = append(tasks, t)
+		if err := s.loadLatestArtifactJSON(caseID, &tasks, "scheduled_tasks"); err != nil {
+			return errorResult(fmt.Sprintf("get scheduled tasks: %v", err))
 		}
 		data = tasks
 

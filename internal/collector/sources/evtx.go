@@ -29,7 +29,7 @@ func CollectEVTX(channels []string, hoursBack int) ([]CollectedFile, error) {
 		channels = DefaultEVTXChannels
 	}
 
-	tmpDir, err := os.MkdirTemp("", "pickaxe-evtx-*")
+	tmpDir, err := os.MkdirTemp("", "artifex-evtx-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}

@@ -1,4 +1,4 @@
-"""Pickaxe Worker Service -- DFIR artifact parsing, YARA scanning, and timeline building.
+"""Artifex Worker Service -- DFIR artifact parsing, YARA scanning, and timeline building.
 
 Exposes an HTTP API on port 8083 (bound to 127.0.0.1) that the main API
 server calls to offload CPU-intensive forensic work.
@@ -10,9 +10,13 @@ import os
 import json
 import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from parsers.evtx_parser import parse_evtx
+from parsers.defender_parser import parse_defender_log
+from parsers.jumplist_parser import parse_jumplist
+from parsers.lnk_parser import parse_lnk
 from parsers.prefetch_parser import parse_prefetch
 from parsers.amcache_parser import parse_amcache
 from parsers.shimcache_parser import parse_shimcache
@@ -29,14 +33,14 @@ app = Flask(__name__)
 WORKER_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(WORKER_DIR)
 
-DB_PATH: str = os.environ.get("PICKAXE_DB", os.path.join(BASE_DIR, "data", "pickaxe.db"))
-EVIDENCE_PATH: str = os.environ.get("PICKAXE_EVIDENCE", os.path.join(BASE_DIR, "evidence"))
+DB_PATH: str = os.environ.get("ARTIFEX_DB", os.path.join(BASE_DIR, "data", "artifex.db"))
+EVIDENCE_PATH: str = os.environ.get("ARTIFEX_EVIDENCE", os.path.join(BASE_DIR, "evidence"))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-log = logging.getLogger("pickaxe.worker")
+log = logging.getLogger("artifex.worker")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,6 +63,29 @@ def _require_json_fields(data: dict | None, *fields: str) -> tuple[bool, str]:
 def _blob_path(artifact_id: str) -> str:
     """Resolve the on-disk path for a stored evidence blob."""
     return os.path.join(EVIDENCE_PATH, f"{artifact_id}.zst")
+
+
+def _parse_steps(raw_steps: Any) -> list[str]:
+    """Normalise action steps from either JSON text or a JSON array."""
+    if isinstance(raw_steps, list):
+        return [str(step).strip() for step in raw_steps if str(step).strip()]
+
+    if not isinstance(raw_steps, str):
+        return []
+
+    raw_steps = raw_steps.strip()
+    if not raw_steps:
+        return []
+
+    try:
+        parsed = json.loads(raw_steps)
+    except json.JSONDecodeError:
+        return [raw_steps]
+
+    if isinstance(parsed, list):
+        return [str(step).strip() for step in parsed if str(step).strip()]
+
+    return [raw_steps]
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +147,81 @@ def route_parse_prefetch() -> tuple:
         return jsonify({"error": f"Blob not found: {blob}"}), 404
     except Exception as exc:
         log.exception("Prefetch parse failed for artifact %s", artifact_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/parse/lnk", methods=["POST"])
+def route_parse_lnk() -> tuple:
+    """Parse a Windows shortcut (.lnk) artifact."""
+    data = request.get_json(silent=True)
+    ok, err = _require_json_fields(data, "artifact_id", "case_id")
+    if not ok:
+        return jsonify({"error": err}), 400
+
+    artifact_id: str = data["artifact_id"]
+    case_id: str = data["case_id"]
+    blob = data.get("blob_path", _blob_path(artifact_id))
+    source = data.get("source", "")
+
+    try:
+        count = parse_lnk(artifact_id, case_id, blob, DB_PATH, str(source))
+        log.info("Parsed %d shortcut events for artifact %s", count, artifact_id)
+        return jsonify({"artifact_id": artifact_id, "events_parsed": count}), 200
+    except FileNotFoundError:
+        return jsonify({"error": f"Blob not found: {blob}"}), 404
+    except Exception as exc:
+        log.exception("Shortcut parse failed for artifact %s", artifact_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/parse/jumplist", methods=["POST"])
+def route_parse_jumplist() -> tuple:
+    """Parse a Windows Jump List container."""
+    data = request.get_json(silent=True)
+    ok, err = _require_json_fields(data, "artifact_id", "case_id")
+    if not ok:
+        return jsonify({"error": err}), 400
+
+    artifact_id: str = data["artifact_id"]
+    case_id: str = data["case_id"]
+    blob = data.get("blob_path", _blob_path(artifact_id))
+    source = data.get("source", "")
+
+    try:
+        count = parse_jumplist(artifact_id, case_id, blob, DB_PATH, str(source))
+        log.info("Parsed %d Jump List entries for artifact %s", count, artifact_id)
+        return jsonify({"artifact_id": artifact_id, "events_parsed": count}), 200
+    except FileNotFoundError:
+        return jsonify({"error": f"Blob not found: {blob}"}), 404
+    except Exception as exc:
+        log.exception("Jump List parse failed for artifact %s", artifact_id)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/parse/defender", methods=["POST"])
+def route_parse_defender() -> tuple:
+    """Parse a Defender text log or Defender EVTX artifact."""
+    data = request.get_json(silent=True)
+    ok, err = _require_json_fields(data, "artifact_id", "case_id")
+    if not ok:
+        return jsonify({"error": err}), 400
+
+    artifact_id: str = data["artifact_id"]
+    case_id: str = data["case_id"]
+    blob = data.get("blob_path", _blob_path(artifact_id))
+    source = data.get("source", "")
+
+    try:
+        if str(source).lower().endswith(".evtx"):
+            count = parse_evtx(artifact_id, case_id, blob, DB_PATH)
+        else:
+            count = parse_defender_log(artifact_id, case_id, blob, DB_PATH, str(source))
+        log.info("Parsed %d Defender events for artifact %s", count, artifact_id)
+        return jsonify({"artifact_id": artifact_id, "events_parsed": count}), 200
+    except FileNotFoundError:
+        return jsonify({"error": f"Blob not found: {blob}"}), 404
+    except Exception as exc:
+        log.exception("Defender parse failed for artifact %s", artifact_id)
         return jsonify({"error": str(exc)}), 500
 
 
@@ -237,6 +339,45 @@ def route_yara_scan() -> tuple:
 # ---------------------------------------------------------------------------
 
 
+@app.route("/actions/execute", methods=["POST"])
+def route_execute_action() -> tuple:
+    """Record an approved action execution acknowledgement."""
+    data = request.get_json(silent=True)
+    ok, err = _require_json_fields(data, "action_id", "case_id", "type")
+    if not ok:
+        return jsonify({"error": err}), 400
+
+    action_id: str = data["action_id"]
+    case_id: str = data["case_id"]
+    action_type: str = data["type"]
+    title: str = data.get("title", "")
+    rationale: str = data.get("rationale", "")
+    steps = _parse_steps(data.get("steps"))
+    executed_at = datetime.now(timezone.utc).isoformat()
+
+    result = {
+        "action_id": action_id,
+        "case_id": case_id,
+        "type": action_type,
+        "title": title,
+        "status": "recorded",
+        "executed_at": executed_at,
+        "manual_required": True,
+        "automation_performed": False,
+        "message": (
+            "Execution acknowledgement recorded. "
+            "Artifex does not automatically modify the host for response actions; "
+            "carry out the approved steps manually."
+        ),
+        "steps": steps,
+    }
+    if rationale:
+        result["rationale"] = rationale
+
+    log.info("Recorded action execution acknowledgement: action=%s case=%s type=%s", action_id, case_id, action_type)
+    return jsonify(result), 200
+
+
 @app.route("/timeline/build", methods=["POST"])
 def route_timeline_build() -> tuple:
     """Build a merged chronological timeline for a case."""
@@ -288,6 +429,6 @@ def route_timeline_get(case_id: str) -> tuple:
 if __name__ == "__main__":
     from waitress import serve
 
-    port = int(os.environ.get("PICKAXE_WORKER_PORT", "8083"))
-    log.info("Pickaxe worker starting on 127.0.0.1:%d", port)
+    port = int(os.environ.get("ARTIFEX_WORKER_PORT", "8083"))
+    log.info("Artifex worker starting on 127.0.0.1:%d", port)
     serve(app, host="127.0.0.1", port=port)

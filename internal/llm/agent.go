@@ -119,7 +119,8 @@ func RunAgent(
 			messages = append(messages, Message{
 				Role:       RoleTool,
 				Content:    toolOutput,
-				ToolCallID: tc.Name,
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
 			})
 		}
 	}

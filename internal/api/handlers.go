@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pickaxe/dfir/internal/db"
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/db"
+	"github.com/artifex/dfir/internal/models"
 )
 
 var errWorkerUnavailable = errors.New("worker unavailable")
@@ -214,16 +214,23 @@ func (s *Server) handleGetCollectionJob(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
 	page := parsePagination(r)
+	artifactType := strings.TrimSpace(r.URL.Query().Get("type"))
 
-	artifacts, total, err := s.db.ListArtifacts(caseID, page.Limit, page.Offset)
+	artifacts, total, err := s.db.ListArtifactsByType(caseID, artifactType, page.Limit, page.Offset)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to list artifacts")
 		return
 	}
+	hasMore := page.Offset+page.Limit < total
+	nextCursor := ""
+	if hasMore {
+		nextCursor = strconv.Itoa(page.Offset + page.Limit)
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"data":     artifacts,
-		"total":    total,
-		"has_more": page.Offset+page.Limit < total,
+		"data":        artifacts,
+		"total":       total,
+		"has_more":    hasMore,
+		"next_cursor": nextCursor,
 	})
 }
 
@@ -371,7 +378,7 @@ func (s *Server) handleSearchEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No query — return all events in time range
-	events, total, err := s.db.GetEventsByTimeRange(caseID,
+	events, total, err := s.db.GetEventsByTimeRangeFiltered(caseID, source,
 		time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Now().Add(24*time.Hour),
 		page.Limit, page.Offset)
@@ -416,6 +423,7 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	page := parsePagination(r)
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
 
 	start := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Now().Add(24 * time.Hour)
@@ -431,7 +439,7 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	events, total, err := s.db.GetEventsByTimeRange(caseID, start, end, page.Limit, page.Offset)
+	events, total, err := s.db.GetEventsByTimeRangeFiltered(caseID, source, start, end, page.Limit, page.Offset)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to get timeline")
 		return
@@ -443,58 +451,70 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) ensureCaseEventsIndexed(caseID string) error {
-	const artifactBatchSize = 250
+func (s *Server) handleListTimelineSources(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseId")
+	if err := s.ensureCaseEventsIndexed(caseID); err != nil {
+		if errors.Is(err, errWorkerUnavailable) {
+			log.Printf("[api] timeline source indexing skipped for case %s: %v", caseID, err)
+		} else {
+			errorResponse(w, http.StatusBadGateway, "failed to prepare timeline sources: "+err.Error())
+			return
+		}
+	}
 
-	offset := 0
+	sources, err := s.db.ListEventSources(caseID)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, "failed to list timeline sources")
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"data": sources,
+	})
+}
+
+func workerRouteForArtifactType(artifactType string) string {
+	switch artifactType {
+	case "evtx", "powershell_logs":
+		return "/parse/evtx"
+	case "prefetch":
+		return "/parse/prefetch"
+	case "lnk":
+		return "/parse/lnk"
+	case "jumplist_automatic", "jumplist_custom":
+		return "/parse/jumplist"
+	case "amcache":
+		return "/parse/amcache"
+	case "shimcache":
+		return "/parse/shimcache"
+	case "defender_log", "defender_mplog", "defender_history":
+		return "/parse/defender"
+	default:
+		return ""
+	}
+}
+
+func (s *Server) ensureCaseArtifactsIndexed(caseID string, artifactTypes ...string) error {
+	artifacts, err := s.db.ListArtifactsMissingEventsByTypes(caseID, 0, artifactTypes...)
+	if err != nil {
+		return fmt.Errorf("list artifacts missing events: %w", err)
+	}
+
 	processedAny := false
-
-	for {
-		artifacts, total, err := s.db.ListArtifacts(caseID, artifactBatchSize, offset)
-		if err != nil {
-			return fmt.Errorf("list artifacts: %w", err)
+	for _, artifact := range artifacts {
+		route := workerRouteForArtifactType(artifact.Type)
+		if route == "" {
+			continue
 		}
 
-		for _, artifact := range artifacts {
-			var route string
-			switch artifact.Type {
-			case "evtx", "powershell_logs":
-				route = "/parse/evtx"
-			case "prefetch":
-				route = "/parse/prefetch"
-			case "amcache":
-				route = "/parse/amcache"
-			case "shimcache":
-				route = "/parse/shimcache"
-			default:
-				continue
-			}
-
-			var existing int
-			if err := s.db.Conn().QueryRow(
-				`SELECT COUNT(*) FROM events WHERE artifact_id = ?`,
-				artifact.ID,
-			).Scan(&existing); err != nil {
-				return fmt.Errorf("count artifact events %s: %w", artifact.ID, err)
-			}
-			if existing > 0 {
-				continue
-			}
-
-			if err := s.postWorkerJSON(route, map[string]interface{}{
-				"artifact_id": artifact.ID,
-				"case_id":     artifact.CaseID,
-				"blob_path":   artifact.BlobPath,
-			}); err != nil {
-				return fmt.Errorf("parse artifact %s (%s): %w", artifact.ID, artifact.Type, err)
-			}
-			processedAny = true
+		if err := s.postWorkerJSON(route, map[string]interface{}{
+			"artifact_id": artifact.ID,
+			"case_id":     artifact.CaseID,
+			"blob_path":   artifact.BlobPath,
+			"source":      artifact.Source,
+		}); err != nil {
+			return fmt.Errorf("parse artifact %s (%s): %w", artifact.ID, artifact.Type, err)
 		}
-
-		offset += len(artifacts)
-		if offset >= total || len(artifacts) == 0 {
-			break
-		}
+		processedAny = true
 	}
 
 	if processedAny {
@@ -506,6 +526,10 @@ func (s *Server) ensureCaseEventsIndexed(caseID string) error {
 	}
 
 	return nil
+}
+
+func (s *Server) ensureCaseEventsIndexed(caseID string) error {
+	return s.ensureCaseArtifactsIndexed(caseID)
 }
 
 func (s *Server) postWorkerJSON(path string, payload interface{}) error {
@@ -645,52 +669,110 @@ func (s *Server) handleRunYaraScan(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
 
 	var req struct {
-		RuleIDs []string `json:"rule_ids"`
+		RuleID     string   `json:"rule_id"`
+		RuleIDs    []string `json:"rule_ids"`
+		ArtifactID string   `json:"artifact_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		errorResponse(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if len(req.RuleIDs) == 0 {
-		errorResponse(w, http.StatusBadRequest, "rule_ids is required")
+
+	ruleIDs := make([]string, 0, len(req.RuleIDs)+1)
+	seenRuleIDs := make(map[string]struct{}, len(req.RuleIDs)+1)
+	addRuleID := func(ruleID string) {
+		ruleID = strings.TrimSpace(ruleID)
+		if ruleID == "" {
+			return
+		}
+		if _, ok := seenRuleIDs[ruleID]; ok {
+			return
+		}
+		seenRuleIDs[ruleID] = struct{}{}
+		ruleIDs = append(ruleIDs, ruleID)
+	}
+	addRuleID(req.RuleID)
+	for _, ruleID := range req.RuleIDs {
+		addRuleID(ruleID)
+	}
+	if len(ruleIDs) == 0 {
+		errorResponse(w, http.StatusBadRequest, "rule_id or rule_ids is required")
 		return
 	}
 
-	payload, _ := json.Marshal(map[string]interface{}{
-		"case_id":  caseID,
-		"rule_ids": req.RuleIDs,
-	})
-	workerReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		s.workerURL+"/yara/scan", bytes.NewReader(payload))
-	if err != nil {
-		errorResponse(w, http.StatusInternalServerError, "failed to build worker request")
-		return
-	}
-	workerReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(workerReq)
-	if err != nil {
-		errorResponse(w, http.StatusBadGateway, "worker service unavailable")
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		errorResponse(w, http.StatusBadGateway, "worker returned error: "+string(body))
-		return
+	for _, ruleID := range ruleIDs {
+		rule, err := s.db.GetRule(ruleID)
+		if err != nil || rule.CaseID != caseID {
+			errorResponse(w, http.StatusNotFound, "YARA rule not found")
+			return
+		}
 	}
 
-	var scanResult json.RawMessage
-	json.NewDecoder(resp.Body).Decode(&scanResult)
+	if req.ArtifactID != "" {
+		artifact, err := s.db.GetArtifact(req.ArtifactID)
+		if err != nil || artifact.CaseID != caseID {
+			errorResponse(w, http.StatusNotFound, "artifact not found")
+			return
+		}
+	}
 
-	s.audit.Log(caseID, "user", "run_yara_scan", "", fmt.Sprintf("started YARA scan with %d rules", len(req.RuleIDs)))
-	jsonResponse(w, http.StatusAccepted, scanResult)
+	results := make([]interface{}, 0, len(ruleIDs))
+	for _, ruleID := range ruleIDs {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"case_id":     caseID,
+			"rule_id":     ruleID,
+			"artifact_id": req.ArtifactID,
+		})
+		workerReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+			s.workerURL+"/yara/scan", bytes.NewReader(payload))
+		if err != nil {
+			errorResponse(w, http.StatusInternalServerError, "failed to build worker request")
+			return
+		}
+		workerReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(workerReq)
+		if err != nil {
+			errorResponse(w, http.StatusBadGateway, "worker service unavailable")
+			return
+		}
+
+		var scanResult interface{}
+		if resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			errorResponse(w, http.StatusBadGateway, "worker returned error: "+string(body))
+			return
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&scanResult); err != nil {
+			resp.Body.Close()
+			errorResponse(w, http.StatusBadGateway, "failed to decode worker response")
+			return
+		}
+		resp.Body.Close()
+		results = append(results, scanResult)
+	}
+
+	s.audit.Log(caseID, "user", "run_yara_scan", "", fmt.Sprintf("started YARA scan with %d rules", len(ruleIDs)))
+	if len(results) == 1 {
+		jsonResponse(w, http.StatusAccepted, results[0])
+		return
+	}
+	jsonResponse(w, http.StatusAccepted, map[string]interface{}{"results": results})
 }
 
 func (s *Server) handleGetYaraResults(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseId")
-	results, err := s.db.ListResults(caseID, "")
+	ruleID := strings.TrimSpace(r.URL.Query().Get("rule_id"))
+	if ruleID != "" {
+		rule, err := s.db.GetRule(ruleID)
+		if err != nil || rule.CaseID != caseID {
+			errorResponse(w, http.StatusNotFound, "YARA rule not found")
+			return
+		}
+	}
+
+	results, err := s.db.ListResults(caseID, ruleID)
 	if err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to get YARA results")
 		return
@@ -776,14 +858,12 @@ func (s *Server) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC()
-	action.Status = "executed"
-	action.ExecutedAt = &now
-
 	payload, _ := json.Marshal(map[string]interface{}{
 		"case_id":   caseID,
 		"action_id": actionID,
 		"type":      action.Type,
+		"title":     action.Title,
+		"rationale": action.Rationale,
 		"steps":     action.Steps,
 	})
 	workerReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
@@ -796,7 +876,7 @@ func (s *Server) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := http.DefaultClient.Do(workerReq)
 	if err != nil {
-		s.db.UpdateProposalStatus(action.ID, "executed", "execution failed: worker unavailable")
+		_ = s.db.UpdateProposalStatus(action.ID, "approved", "execution failed: worker unavailable")
 		errorResponse(w, http.StatusBadGateway, "worker service unavailable")
 		return
 	}
@@ -806,18 +886,42 @@ func (s *Server) handleExecuteAction(w http.ResponseWriter, r *http.Request) {
 	result := string(resultBody)
 
 	if resp.StatusCode >= 300 {
-		s.db.UpdateProposalStatus(action.ID, "executed", "execution failed: "+result)
+		_ = s.db.UpdateProposalStatus(action.ID, "approved", "execution failed: "+result)
 		errorResponse(w, http.StatusBadGateway, "worker execution failed: "+result)
 		return
 	}
 
-	if err := s.db.UpdateProposalStatus(action.ID, "executed", result); err != nil {
+	var workerResult interface{}
+	storedResult := result
+	if len(resultBody) > 0 {
+		if err := json.Unmarshal(resultBody, &workerResult); err == nil {
+			if pretty, err := json.Marshal(workerResult); err == nil {
+				storedResult = string(pretty)
+			}
+		}
+	}
+	if workerResult == nil {
+		workerResult = map[string]string{"message": result}
+	}
+
+	if err := s.db.UpdateProposalStatus(action.ID, "executed", storedResult); err != nil {
 		errorResponse(w, http.StatusInternalServerError, "failed to record action result")
 		return
 	}
 
+	now := time.Now().UTC()
+	action.Status = "executed"
+	action.ExecutedAt = &now
+	action.Result = storedResult
+
 	s.audit.Log(caseID, "user", "execute_action", "", fmt.Sprintf("executed action %s: %s", actionID, action.Title))
-	jsonResponse(w, http.StatusOK, action)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"action_id":     action.ID,
+		"case_id":       action.CaseID,
+		"status":        action.Status,
+		"executed_at":   now,
+		"worker_result": workerResult,
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Handles the binary Prefetch format for Windows versions XP through 11.
 Decompresses zstd blobs, extracts execution metadata, and inserts
-normalised events into the Pickaxe ``events`` table.
+normalised events into the Artifex ``events`` table.
 
 Reference structure (simplified):
   Offset 0x00  - Signature / version (4 bytes)
@@ -15,6 +15,7 @@ Reference structure (simplified):
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ from typing import Any
 
 import zstandard
 
-log = logging.getLogger("pickaxe.parser.prefetch")
+log = logging.getLogger("artifex.parser.prefetch")
 
 # Prefetch format versions.
 _VER_XP = 17       # Windows XP / 2003
@@ -40,6 +41,13 @@ _BATCH_SIZE = 200
 
 # Windows FILETIME epoch: 1601-01-01.
 _FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
+
+# Windows 8+ compressed Prefetch files use an internal "MAM" wrapper.
+_MAM_SIGNATURE = 0x004D414D
+_MAM_SIGNATURE_MASK = 0x00FFFFFF
+_COMPRESSION_FORMAT_LZNT1 = 0x0002
+_COMPRESSION_FORMAT_XPRESS = 0x0003
+_COMPRESSION_FORMAT_XPRESS_HUFF = 0x0004
 
 
 def _decompress_blob(blob_path: str) -> str:
@@ -70,11 +78,95 @@ def _filetime_to_iso(filetime: int) -> str:
         return ""
 
 
+def _decompress_windows_prefetch(data: bytes) -> bytes:
+    """Expand a Windows-compressed Prefetch payload if needed."""
+    if len(data) < 8:
+        return data
+
+    signature = struct.unpack_from("<I", data, 0)[0]
+    if signature & _MAM_SIGNATURE_MASK != _MAM_SIGNATURE:
+        return data
+
+    if os.name != "nt":
+        raise RuntimeError("compressed Windows Prefetch files require Windows decompression support")
+
+    compression_format = (signature >> 24) & 0x0F
+    has_checksum = (signature >> 28) & 0x0F
+    if compression_format not in {
+        _COMPRESSION_FORMAT_LZNT1,
+        _COMPRESSION_FORMAT_XPRESS,
+        _COMPRESSION_FORMAT_XPRESS_HUFF,
+    }:
+        raise RuntimeError(f"unsupported Prefetch compression format: {compression_format}")
+
+    decompressed_size = struct.unpack_from("<I", data, 4)[0]
+    payload_offset = 12 if has_checksum else 8
+    compressed = data[payload_offset:]
+    if not compressed:
+        raise RuntimeError("compressed Prefetch payload is empty")
+
+    ntdll = ctypes.WinDLL("ntdll")
+    get_workspace_size = ntdll.RtlGetCompressionWorkSpaceSize
+    get_workspace_size.argtypes = [
+        ctypes.c_ushort,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    get_workspace_size.restype = ctypes.c_long
+
+    decompress = ntdll.RtlDecompressBufferEx
+    decompress.argtypes = [
+        ctypes.c_ushort,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+    ]
+    decompress.restype = ctypes.c_long
+
+    workspace_size = ctypes.c_ulong()
+    fragment_size = ctypes.c_ulong()
+    status = get_workspace_size(
+        compression_format,
+        ctypes.byref(workspace_size),
+        ctypes.byref(fragment_size),
+    )
+    if status != 0:
+        raise RuntimeError(f"RtlGetCompressionWorkSpaceSize failed: 0x{status & 0xFFFFFFFF:08X}")
+
+    output = ctypes.create_string_buffer(decompressed_size)
+    compressed_buffer = ctypes.create_string_buffer(compressed, len(compressed))
+    final_size = ctypes.c_ulong()
+    workspace = ctypes.create_string_buffer(workspace_size.value)
+
+    status = decompress(
+        compression_format,
+        output,
+        decompressed_size,
+        compressed_buffer,
+        len(compressed),
+        ctypes.byref(final_size),
+        workspace,
+    )
+    if status != 0:
+        raise RuntimeError(f"RtlDecompressBufferEx failed: 0x{status & 0xFFFFFFFF:08X}")
+
+    return output.raw[:final_size.value]
+
+
 def _parse_pf_data(data: bytes) -> dict[str, Any] | None:
     """Parse raw prefetch bytes and return extracted metadata.
 
     Returns ``None`` if the data is not a valid Prefetch file.
     """
+    try:
+        data = _decompress_windows_prefetch(data)
+    except Exception as exc:
+        log.warning("Failed to decompress Windows Prefetch payload: %s", exc)
+        return None
+
     if len(data) < 0x60:
         log.warning("Prefetch data too short (%d bytes)", len(data))
         return None
@@ -161,12 +253,12 @@ def parse_prefetch(
     blob_path:
         Path to the (possibly zstd-compressed) .pf file.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------
     int
-        Number of events inserted (one per last-run timestamp, minimum 1).
+        Number of events inserted (one per stored last-run timestamp, minimum 1).
     """
     if not os.path.isfile(blob_path):
         raise FileNotFoundError(f"Evidence blob not found: {blob_path}")
@@ -189,17 +281,33 @@ def parse_prefetch(
         conn.commit()
         rows: list[tuple] = []
 
-        # Create one event per last-run timestamp so each execution appears
-        # in the timeline.  If there are no timestamps, insert a single
-        # summary event with an empty timestamp.
+        # Create one event per stored last-run timestamp so each recorded
+        # Prefetch timestamp appears in the timeline. If there are no
+        # timestamps, insert a single summary event with an empty timestamp.
         timestamps = parsed["last_run_times"] if parsed["last_run_times"] else [""]
+        total_timestamps = len(parsed["last_run_times"])
 
-        for ts in timestamps:
-            raw = json.dumps(parsed, default=str)
-            message = (
-                f"Executable {parsed['executable']} ran "
-                f"{parsed['run_count']} times (prefetch hash {parsed['prefetch_hash']})."
-            )
+        for index, ts in enumerate(timestamps, start=1):
+            event_data = {
+                **parsed,
+                "observed_timestamp": ts,
+                "observed_timestamp_index": index if ts else 0,
+                "observed_timestamp_total": total_timestamps,
+            }
+            raw = json.dumps(event_data, default=str)
+
+            if ts:
+                message = (
+                    f"Prefetch recorded {parsed['executable']} with a recent execution "
+                    f"timestamp (slot {index} of {total_timestamps}; recorded run count "
+                    f"field {parsed['run_count']}; prefetch hash {parsed['prefetch_hash']})."
+                )
+            else:
+                message = (
+                    f"Prefetch recorded {parsed['executable']}, but no recent execution "
+                    f"timestamps were present (recorded run count field "
+                    f"{parsed['run_count']}; prefetch hash {parsed['prefetch_hash']})."
+                )
 
             rows.append((
                 case_id,

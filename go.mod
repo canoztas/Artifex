@@ -1,4 +1,4 @@
-module github.com/pickaxe/dfir
+module github.com/artifex/dfir
 
 go 1.22.0
 

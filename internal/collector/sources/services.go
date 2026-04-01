@@ -4,7 +4,7 @@ import (
 	"encoding/csv"
 	"strings"
 
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/models"
 )
 
 // CollectServices captures a snapshot of all Windows services using

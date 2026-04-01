@@ -1,6 +1,6 @@
 """YARA rule scanner.
 
-Loads YARA rules from the Pickaxe database, decompresses evidence blobs,
+Loads YARA rules from the Artifex database, decompresses evidence blobs,
 and runs scans with strict size and time limits.
 """
 
@@ -9,17 +9,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import sqlite3
 import tempfile
-import threading
-import time
+from datetime import datetime, timezone
 from typing import Any
 
 import yara
 import zstandard
 
-log = logging.getLogger("pickaxe.scanner.yara")
+log = logging.getLogger("artifex.scanner.yara")
 
 # Safety limits.
 _MAX_BLOB_SIZE: int = 100 * 1024 * 1024  # 100 MB
@@ -52,7 +50,7 @@ def _load_rule(rule_id: str, db_path: str) -> dict[str, Any]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT id, name, source FROM yara_rules WHERE id = ?",
+        "SELECT id, name, content FROM yara_rules WHERE id = ?",
         (rule_id,),
     ).fetchone()
     conn.close()
@@ -125,23 +123,67 @@ def _store_results(
     db_path: str,
 ) -> None:
     """Persist scan results in the ``yara_results`` table."""
+    scanned_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
-        INSERT OR REPLACE INTO yara_results
-            (rule_id, artifact_id, case_id, match_count, matches_json, scanned_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        DELETE FROM yara_results
+        WHERE case_id = ? AND rule_id = ? AND artifact_id = ?
+        """,
+        (case_id, rule_id, artifact_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO yara_results
+            (case_id, rule_id, artifact_id, matches, scanned_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
+            case_id,
             rule_id,
             artifact_id,
-            case_id,
-            len(matches),
             json.dumps(matches, default=str),
+            scanned_at,
         ),
     )
     conn.commit()
     conn.close()
+
+
+def _resolve_blob_path(blob_path: str, db_path: str, evidence_path: str) -> str:
+    """Resolve an artifact blob path from DB storage to an on-disk file path."""
+    candidates = [blob_path]
+    if not os.path.isabs(blob_path):
+        repo_root = os.path.dirname(os.path.dirname(db_path))
+        candidates.append(os.path.join(repo_root, blob_path))
+        candidates.append(os.path.join(evidence_path, blob_path))
+
+    for candidate in candidates:
+        normalized = os.path.normpath(candidate)
+        if os.path.isfile(normalized):
+            return normalized
+
+    return os.path.normpath(candidates[-1])
+
+
+def _get_artifact_blob_path(
+    artifact_id: str,
+    case_id: str,
+    db_path: str,
+    evidence_path: str,
+) -> str:
+    """Look up the stored blob path for an artifact and resolve it for scanning."""
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT blob_path FROM artifacts WHERE id = ? AND case_id = ?",
+        (artifact_id, case_id),
+    ).fetchone()
+    conn.close()
+
+    if row is None:
+        raise FileNotFoundError(f"Artifact not found: {artifact_id}")
+
+    return _resolve_blob_path(row[0], db_path, evidence_path)
 
 
 def scan_artifact(
@@ -162,7 +204,7 @@ def scan_artifact(
     case_id:
         Parent case identifier.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
     evidence_path:
         Base directory where evidence blobs are stored.
 
@@ -173,9 +215,9 @@ def scan_artifact(
         and ``matches`` list.
     """
     rule_row = _load_rule(rule_id, db_path)
-    rules = _compile_rule(rule_row["source"])
+    rules = _compile_rule(rule_row["content"])
 
-    blob_path = os.path.join(evidence_path, f"{artifact_id}.zst")
+    blob_path = _get_artifact_blob_path(artifact_id, case_id, db_path, evidence_path)
     if not os.path.isfile(blob_path):
         raise FileNotFoundError(f"Evidence blob not found: {blob_path}")
 
@@ -219,7 +261,7 @@ def scan_case(
     case_id:
         Case to scan.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
     evidence_path:
         Base directory where evidence blobs are stored.
 
@@ -229,12 +271,12 @@ def scan_case(
         Aggregated summary with per-artifact results.
     """
     rule_row = _load_rule(rule_id, db_path)
-    rules = _compile_rule(rule_row["source"])
+    rules = _compile_rule(rule_row["content"])
 
     # Fetch all artifact IDs for the case.
     conn = sqlite3.connect(db_path)
     artifact_rows = conn.execute(
-        "SELECT id FROM artifacts WHERE case_id = ?",
+        "SELECT id, blob_path FROM artifacts WHERE case_id = ?",
         (case_id,),
     ).fetchall()
     conn.close()
@@ -255,8 +297,8 @@ def scan_case(
     scanned = 0
     errors: list[dict[str, str]] = []
 
-    for (artifact_id,) in artifact_rows:
-        blob_path = os.path.join(evidence_path, f"{artifact_id}.zst")
+    for artifact_id, raw_blob_path in artifact_rows:
+        blob_path = _resolve_blob_path(raw_blob_path, db_path, evidence_path)
         if not os.path.isfile(blob_path):
             log.warning("Blob missing for artifact %s; skipping", artifact_id)
             errors.append({"artifact_id": artifact_id, "error": "blob not found"})

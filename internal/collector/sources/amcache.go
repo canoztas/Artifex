@@ -13,7 +13,7 @@ const amcachePath = `C:\Windows\AppCompat\Programs\Amcache.hve`
 // Because the file is typically locked by the system, we first attempt a
 // direct copy and fall back to using a Volume Shadow Copy if that fails.
 func CollectAmCache() ([]CollectedFile, error) {
-	tmpDir, err := os.MkdirTemp("", "pickaxe-amcache-*")
+	tmpDir, err := os.MkdirTemp("", "artifex-amcache-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
@@ -56,9 +56,9 @@ $shadowID = $shadow.ShadowID
 $shadowObj = Get-WmiObject Win32_ShadowCopy | Where-Object { $_.ID -eq $shadowID }
 $device = $shadowObj.DeviceObject
 $srcRel = "%s" -replace '^C:\\', ''
-cmd /c mklink /d "$env:TEMP\PickaxeVSS" "$device\"
-Copy-Item "$env:TEMP\PickaxeVSS\$srcRel" "%s" -Force
-cmd /c rmdir "$env:TEMP\PickaxeVSS"
+cmd /c mklink /d "$env:TEMP\ArtifexVSS" "$device\"
+Copy-Item "$env:TEMP\ArtifexVSS\$srcRel" "%s" -Force
+cmd /c rmdir "$env:TEMP\ArtifexVSS"
 $shadowObj.Delete()
 `, src, dst)
 

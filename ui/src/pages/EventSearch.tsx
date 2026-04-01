@@ -8,6 +8,7 @@ import {
   X,
 } from 'lucide-react'
 import { searchEvents } from '../api/client'
+import { EventSummary, EventStructuredDetails } from '../components/EventEvidence'
 import type { Event } from '../types'
 import Pagination from '../components/Pagination'
 
@@ -141,7 +142,7 @@ export default function EventSearch() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-100">Event Search</h1>
         <p className="text-sm text-slate-400 mt-1">
-          Search across collected Windows event logs
+          Search across collected normalized events
         </p>
       </div>
 
@@ -286,9 +287,10 @@ export default function EventSearch() {
                         </span>
                       )}
                     </div>
-                    <p className="text-sm text-slate-300 line-clamp-2">
-                      {highlightMatch(event.message, submittedQuery)}
-                    </p>
+                    <EventSummary
+                      event={event}
+                      highlightText={(text) => highlightMatch(text, submittedQuery)}
+                    />
                   </div>
                   <ChevronDown
                     size={16}
@@ -318,6 +320,10 @@ export default function EventSearch() {
                         <span className="text-slate-300">{event.source}</span>
                       </div>
                     </div>
+                    <EventStructuredDetails
+                      event={event}
+                      highlightText={(text) => highlightMatch(text, submittedQuery)}
+                    />
                     <div>
                       <p className="text-xs text-slate-500 mb-1">Full Message:</p>
                       <p className="text-sm text-slate-300 whitespace-pre-wrap bg-slate-900 p-3 rounded-lg">
@@ -326,7 +332,7 @@ export default function EventSearch() {
                     </div>
                     {event.raw_xml && (
                       <div>
-                        <p className="text-xs text-slate-500 mb-1">Raw XML:</p>
+                        <p className="text-xs text-slate-500 mb-1">Raw Data:</p>
                         <pre className="p-3 bg-slate-900 rounded-lg text-xs text-slate-400 font-mono overflow-auto max-h-48">
                           {event.raw_xml}
                         </pre>

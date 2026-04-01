@@ -1,4 +1,4 @@
-// Command mcp runs the Pickaxe DFIR MCP (Model Context Protocol) server.
+// Command mcp runs the Artifex DFIR MCP (Model Context Protocol) server.
 //
 // It exposes read-only forensic investigation tools to AI agents over JSON-RPC
 // 2.0 transported via stdio (stdin/stdout), following the MCP specification.
@@ -6,7 +6,7 @@
 //
 // Usage:
 //
-//	pickaxe-mcp [flags]
+//	artifex-mcp [flags]
 //	  -config string  path to the configuration directory (default: executable directory)
 //	  -db     string  override path to the SQLite database file
 package main
@@ -21,11 +21,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/pickaxe/dfir/internal/audit"
-	"github.com/pickaxe/dfir/internal/config"
-	"github.com/pickaxe/dfir/internal/db"
-	"github.com/pickaxe/dfir/internal/evidence"
-	"github.com/pickaxe/dfir/internal/mcp"
+	"github.com/artifex/dfir/internal/audit"
+	"github.com/artifex/dfir/internal/config"
+	"github.com/artifex/dfir/internal/db"
+	"github.com/artifex/dfir/internal/evidence"
+	"github.com/artifex/dfir/internal/mcp"
 
 	_ "modernc.org/sqlite"
 )
@@ -38,7 +38,7 @@ func main() {
 	dbPath := flag.String("db", "", "override path to the SQLite database file")
 	flag.Parse()
 
-	logger.Println("Pickaxe DFIR MCP server starting")
+	logger.Println("Artifex DFIR MCP server starting")
 	logger.Printf("config directory: %s", *configDir)
 
 	// Load configuration.
@@ -49,7 +49,7 @@ func main() {
 	logger.Printf("data directory: %s", cfg.DataDir)
 
 	// Determine database path.
-	dbFile := filepath.Join(cfg.DataDir, "pickaxe.db")
+	dbFile := filepath.Join(cfg.DataDir, "artifex.db")
 	if *dbPath != "" {
 		dbFile = *dbPath
 	}
@@ -74,9 +74,10 @@ func main() {
 	auditLogger := audit.NewLogger(database)
 	logger.Println("audit logger initialized")
 
-	// Build the API base URL for the collector and worker services.
-	apiURL := fmt.Sprintf("http://%s:%d", cfg.BindAddress, cfg.CollectorPort)
-	logger.Printf("collector API URL: %s", apiURL)
+	// Build the API base URL used by MCP tool handlers that proxy through the
+	// main HTTP API.
+	apiURL := fmt.Sprintf("http://%s:%d", cfg.BindAddress, cfg.APIPort)
+	logger.Printf("API URL: %s", apiURL)
 
 	// Create and run the MCP server.
 	server := mcp.NewServer(database, store, auditLogger, apiURL)

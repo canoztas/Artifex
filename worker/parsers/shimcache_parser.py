@@ -29,7 +29,7 @@ from typing import Any
 
 import zstandard
 
-log = logging.getLogger("pickaxe.parser.shimcache")
+log = logging.getLogger("artifex.parser.shimcache")
 
 _BATCH_SIZE = 500
 _FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
@@ -244,7 +244,7 @@ def parse_shimcache(
     blob_path:
         Path to the (possibly zstd-compressed) ShimCache binary data.
     db_path:
-        Path to the Pickaxe SQLite database.
+        Path to the Artifex SQLite database.
 
     Returns
     -------

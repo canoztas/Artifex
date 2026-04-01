@@ -216,7 +216,7 @@ export default function AgentWorkspace() {
           <Bot size={24} className="text-purple-400" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-slate-100">Pickaxe Agent</h1>
+          <h1 className="text-2xl font-bold text-slate-100">Artifex Agent</h1>
           <p className="text-sm text-slate-400">
             AI-powered DFIR analysis &mdash; ask questions about collected evidence
           </p>

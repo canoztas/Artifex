@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/artifex/dfir/internal/collector/sources"
+	"github.com/artifex/dfir/internal/models"
 	"github.com/google/uuid"
-	"github.com/pickaxe/dfir/internal/collector/sources"
-	"github.com/pickaxe/dfir/internal/models"
 )
 
 // Version is the collector version stamped into every artifact record.
@@ -35,6 +35,15 @@ type EvidenceStore interface {
 type DB interface {
 	// CreateArtifact persists an artifact record.
 	CreateArtifact(a *models.Artifact) error
+	// FindArtifactByFingerprint returns an existing artifact with the same
+	// case/type/source/content fingerprint when present.
+	FindArtifactByFingerprint(caseID, artifactType, source, sha256 string) (*models.Artifact, error)
+	// FindArtifactBySourceState returns an existing artifact when the backing
+	// source file has not changed since the last collection.
+	FindArtifactBySourceState(caseID, artifactType, source string, sourceSize int64, sourceModTime time.Time) (*models.Artifact, error)
+	// UpsertArtifactSourceState records the latest observed source metadata for
+	// file-backed artifacts.
+	UpsertArtifactSourceState(caseID, artifactType, source string, sourceSize int64, sourceModTime time.Time, artifact *models.Artifact) error
 	// CreateJob persists a new collection job.
 	CreateJob(job *models.CollectionJob) error
 	// UpdateJobProgress updates job progress and step statuses.
@@ -83,6 +92,8 @@ var standardSteps = []collectionStep{
 	{"Network Snapshot", (*Collector).collectNetworkSnapshot},
 	{"Persistence Registry Keys", (*Collector).collectPersistenceKeys},
 	{"Prefetch Files", (*Collector).collectPrefetch},
+	{"Shortcut Files (.lnk)", (*Collector).collectShortcuts},
+	{"Jump Lists", (*Collector).collectJumpLists},
 	{"AmCache", (*Collector).collectAmCache},
 	{"ShimCache", (*Collector).collectShimCache},
 	{"PowerShell Logs", (*Collector).collectPowerShellLogs},
@@ -192,19 +203,58 @@ func (c *Collector) RunPreset(job *models.CollectionJob, cfg models.CollectionCo
 	return nil
 }
 
+func (c *Collector) recordSourceState(caseID, artifactType, source string, sourceState *sources.SourceState, artifact *models.Artifact) {
+	if sourceState == nil || artifact == nil {
+		return
+	}
+	if err := c.db.UpsertArtifactSourceState(caseID, artifactType, source, sourceState.Size, sourceState.ModTime, artifact); err != nil {
+		log.Printf("[collector] source-state cache update failed for %s (%s): %v", source, artifactType, err)
+	}
+}
+
+func (c *Collector) storeCollectedFile(caseID, artifactType, method, privileges string, file sources.CollectedFile) (*models.Artifact, error) {
+	if file.State != nil {
+		existing, err := c.db.FindArtifactBySourceState(caseID, artifactType, file.Source, file.State.Size, file.State.ModTime)
+		if err != nil {
+			return nil, fmt.Errorf("check unchanged source: %w", err)
+		}
+		if existing != nil {
+			log.Printf("[collector] unchanged source skipped for case %s: type=%s source=%s", caseID, artifactType, file.Source)
+			return existing, nil
+		}
+	}
+
+	data, err := sources.ReadFile(file.Path)
+	if err != nil {
+		return nil, fmt.Errorf("read collected file: %w", err)
+	}
+	return c.storeArtifact(caseID, artifactType, file.Source, method, privileges, data, file.State)
+}
+
 // storeArtifact compresses and stores raw artifact data, then records the
 // artifact in the database.
-func (c *Collector) storeArtifact(caseID, artifactType, source, method, privileges string, data []byte) (*models.Artifact, error) {
+func (c *Collector) storeArtifact(caseID, artifactType, source, method, privileges string, data []byte, sourceState *sources.SourceState) (*models.Artifact, error) {
 	sha256Hash, blobPath, compressedSize, err := c.store.Store(caseID, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store evidence: %w", err)
+	}
+
+	existing, err := c.db.FindArtifactByFingerprint(caseID, artifactType, source, sha256Hash)
+	if err != nil {
+		return nil, fmt.Errorf("check existing artifact: %w", err)
+	}
+	if existing != nil {
+		c.recordSourceState(caseID, artifactType, source, sourceState, existing)
+		log.Printf("[collector] duplicate artifact skipped for case %s: type=%s source=%s sha256=%s",
+			caseID, artifactType, source, sha256Hash)
+		return existing, nil
 	}
 
 	artifact := &models.Artifact{
 		ID:               uuid.New().String(),
 		CaseID:           caseID,
 		Type:             artifactType,
-		Source:            source,
+		Source:           source,
 		CollectionMethod: method,
 		CollectorVersion: Version,
 		PrivilegesUsed:   privileges,
@@ -219,6 +269,7 @@ func (c *Collector) storeArtifact(caseID, artifactType, source, method, privileg
 	if err := c.db.CreateArtifact(artifact); err != nil {
 		return nil, fmt.Errorf("failed to record artifact: %w", err)
 	}
+	c.recordSourceState(caseID, artifactType, source, sourceState, artifact)
 
 	if err := c.postProcessArtifact(artifact); err != nil {
 		log.Printf("[collector] post-processing skipped for artifact %s (%s): %v", artifact.ID, artifact.Type, err)
@@ -278,10 +329,16 @@ func (c *Collector) postProcessArtifact(artifact *models.Artifact) error {
 		route = "/parse/evtx"
 	case "prefetch":
 		route = "/parse/prefetch"
+	case "lnk":
+		route = "/parse/lnk"
+	case "jumplist_automatic", "jumplist_custom":
+		route = "/parse/jumplist"
 	case "amcache":
 		route = "/parse/amcache"
 	case "shimcache":
 		route = "/parse/shimcache"
+	case "defender_log", "defender_mplog", "defender_history":
+		route = "/parse/defender"
 	default:
 		return nil
 	}
@@ -290,6 +347,7 @@ func (c *Collector) postProcessArtifact(artifact *models.Artifact) error {
 		"artifact_id": artifact.ID,
 		"case_id":     artifact.CaseID,
 		"blob_path":   artifact.BlobPath,
+		"source":      artifact.Source,
 	})
 }
 
@@ -312,7 +370,7 @@ func (c *Collector) collectHostMetadata(job *models.CollectionJob, cfg models.Co
 	}
 
 	data, _ := json.MarshalIndent(meta, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "host_metadata", "system_api", "api_query", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "host_metadata", "system_api", "api_query", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -337,12 +395,7 @@ func (c *Collector) collectEventLogs(job *models.CollectionJob, cfg models.Colle
 
 	stored := 0
 	for _, f := range files {
-		data, readErr := sources.ReadFile(f.Path)
-		if readErr != nil {
-			log.Printf("[collector] failed to read %s: %v", f.Path, readErr)
-			continue
-		}
-		if _, storeErr := c.storeArtifact(cfg.CaseID, "evtx", f.Source, "wevtutil_export", "admin", data); storeErr != nil {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, "evtx", "wevtutil_export", "admin", f); storeErr != nil {
 			log.Printf("[collector] failed to store %s: %v", f.Source, storeErr)
 			continue
 		}
@@ -363,7 +416,7 @@ func (c *Collector) collectProcessSnapshot(job *models.CollectionJob, cfg models
 		return
 	}
 	data, _ := json.MarshalIndent(processes, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "process_snapshot", "system_api", "wmi_query", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "process_snapshot", "system_api", "wmi_query", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -377,7 +430,7 @@ func (c *Collector) collectServiceSnapshot(job *models.CollectionJob, cfg models
 		return
 	}
 	data, _ := json.MarshalIndent(services, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "service_snapshot", "system_api", "wmi_query", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "service_snapshot", "system_api", "wmi_query", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -391,7 +444,7 @@ func (c *Collector) collectScheduledTasks(job *models.CollectionJob, cfg models.
 		return
 	}
 	data, _ := json.MarshalIndent(tasks, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "scheduled_tasks", "system_api", "schtasks_query", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "scheduled_tasks", "system_api", "schtasks_query", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -405,7 +458,7 @@ func (c *Collector) collectNetworkSnapshot(job *models.CollectionJob, cfg models
 		return
 	}
 	data, _ := json.MarshalIndent(snapshot, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "network_snapshot", "system_api", "api_query", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "network_snapshot", "system_api", "api_query", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -419,7 +472,7 @@ func (c *Collector) collectPersistenceKeys(job *models.CollectionJob, cfg models
 	}
 
 	data, _ := json.MarshalIndent(keys, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "registry_persistence", "registry", "reg_query", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "registry_persistence", "registry", "reg_query", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -448,13 +501,38 @@ func (c *Collector) collectPrefetch(job *models.CollectionJob, cfg models.Collec
 	}
 
 	for _, f := range files {
-		data, readErr := sources.ReadFile(f.Path)
-		if readErr != nil {
-			log.Printf("[collector] failed to read prefetch %s: %v", f.Path, readErr)
-			continue
-		}
-		if _, storeErr := c.storeArtifact(cfg.CaseID, "prefetch", f.Source, "file_copy", "admin", data); storeErr != nil {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, "prefetch", "file_copy", "admin", f); storeErr != nil {
 			log.Printf("[collector] failed to store prefetch %s: %v", f.Source, storeErr)
+		}
+	}
+	update(stepIdx, "completed", nil)
+}
+
+func (c *Collector) collectShortcuts(job *models.CollectionJob, cfg models.CollectionConfig, stepIdx int, update progressFunc) {
+	files, err := sources.CollectShortcuts()
+	if err != nil {
+		update(stepIdx, "failed", err)
+		return
+	}
+
+	for _, f := range files {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, "lnk", "file_copy", "user", f); storeErr != nil {
+			log.Printf("[collector] failed to store shortcut %s: %v", f.Source, storeErr)
+		}
+	}
+	update(stepIdx, "completed", nil)
+}
+
+func (c *Collector) collectJumpLists(job *models.CollectionJob, cfg models.CollectionConfig, stepIdx int, update progressFunc) {
+	files, err := sources.CollectJumpLists()
+	if err != nil {
+		update(stepIdx, "failed", err)
+		return
+	}
+
+	for _, f := range files {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, f.Type, "file_copy", "user", f); storeErr != nil {
+			log.Printf("[collector] failed to store Jump List %s: %v", f.Source, storeErr)
 		}
 	}
 	update(stepIdx, "completed", nil)
@@ -468,12 +546,7 @@ func (c *Collector) collectAmCache(job *models.CollectionJob, cfg models.Collect
 	}
 
 	for _, f := range files {
-		data, readErr := sources.ReadFile(f.Path)
-		if readErr != nil {
-			log.Printf("[collector] failed to read amcache: %v", readErr)
-			continue
-		}
-		if _, storeErr := c.storeArtifact(cfg.CaseID, "amcache", f.Source, "file_copy", "admin", data); storeErr != nil {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, "amcache", "file_copy", "admin", f); storeErr != nil {
 			log.Printf("[collector] failed to store amcache: %v", storeErr)
 		}
 	}
@@ -488,12 +561,7 @@ func (c *Collector) collectShimCache(job *models.CollectionJob, cfg models.Colle
 	}
 
 	for _, f := range files {
-		data, readErr := sources.ReadFile(f.Path)
-		if readErr != nil {
-			log.Printf("[collector] failed to read shimcache: %v", readErr)
-			continue
-		}
-		if _, storeErr := c.storeArtifact(cfg.CaseID, "shimcache", f.Source, "registry_export", "admin", data); storeErr != nil {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, "shimcache", "registry_export", "admin", f); storeErr != nil {
 			log.Printf("[collector] failed to store shimcache: %v", storeErr)
 		}
 	}
@@ -521,12 +589,7 @@ func (c *Collector) collectPowerShellLogs(job *models.CollectionJob, cfg models.
 
 	stored := 0
 	for _, f := range files {
-		data, readErr := sources.ReadFile(f.Path)
-		if readErr != nil {
-			log.Printf("[collector] failed to read PowerShell log %s: %v", f.Path, readErr)
-			continue
-		}
-		if _, storeErr := c.storeArtifact(cfg.CaseID, "powershell_logs", f.Source, "wevtutil_export", "admin", data); storeErr != nil {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, "powershell_logs", "wevtutil_export", "admin", f); storeErr != nil {
 			log.Printf("[collector] failed to store PowerShell log %s: %v", f.Source, storeErr)
 			continue
 		}
@@ -548,12 +611,7 @@ func (c *Collector) collectDefenderLogs(job *models.CollectionJob, cfg models.Co
 	}
 
 	for _, f := range files {
-		data, readErr := sources.ReadFile(f.Path)
-		if readErr != nil {
-			log.Printf("[collector] failed to read Defender log %s: %v", f.Path, readErr)
-			continue
-		}
-		if _, storeErr := c.storeArtifact(cfg.CaseID, "defender_log", f.Source, "file_copy", "admin", data); storeErr != nil {
+		if _, storeErr := c.storeCollectedFile(cfg.CaseID, f.Type, "file_copy", "admin", f); storeErr != nil {
 			log.Printf("[collector] failed to store Defender log %s: %v", f.Source, storeErr)
 		}
 	}
@@ -567,7 +625,7 @@ func (c *Collector) collectFilesystemMetadata(job *models.CollectionJob, cfg mod
 		return
 	}
 	data, _ := json.MarshalIndent(metadata, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "filesystem_metadata", "filesystem", "directory_scan", "standard", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "filesystem_metadata", "filesystem", "directory_scan", "standard", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -611,7 +669,7 @@ func (c *Collector) collectExtendedRegistry(job *models.CollectionJob, cfg model
 	}
 
 	data, _ := json.MarshalIndent(allKeys, "", "  ")
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "extended_registry", "registry", "reg_query", "admin", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "extended_registry", "registry", "reg_query", "admin", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}
@@ -642,7 +700,7 @@ func (c *Collector) collectMemory(job *models.CollectionJob, cfg models.Collecti
 		return
 	}
 
-	if _, storeErr := c.storeArtifact(cfg.CaseID, "memory_dump", "physical_memory", "winpmem", "admin_elevated", data); storeErr != nil {
+	if _, storeErr := c.storeArtifact(cfg.CaseID, "memory_dump", "physical_memory", "winpmem", "admin_elevated", data, nil); storeErr != nil {
 		update(stepIdx, "failed", storeErr)
 		return
 	}

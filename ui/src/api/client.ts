@@ -5,6 +5,7 @@ import type {
   CollectionJob,
   YaraRule,
   YaraResult,
+  YaraMatch,
   ActionProposal,
   AuditEntry,
   PersistenceItem,
@@ -55,6 +56,91 @@ type RawEvent = Partial<Event> & {
   raw_xml?: string
   raw_data?: string
   metadata?: Record<string, string>
+}
+
+type RawActionProposal = Partial<ActionProposal> & {
+  id: string
+  case_id?: string
+  type?: string
+  title?: string
+  description?: string
+  rationale?: string
+  steps?: string[] | string
+  status?: string
+  created_at?: string
+  approved_at?: string
+  reviewed_at?: string
+  executed_at?: string
+  result?: string
+  risk_level?: string
+}
+
+type RawYaraStringMatch = {
+  name?: string
+  identifier?: string
+  offset?: number
+  data?: string
+}
+
+type RawYaraMatch = {
+  rule?: string
+  namespace?: string
+  strings?: RawYaraStringMatch[]
+}
+
+type RawYaraResult = {
+  id: string | number
+  case_id?: string
+  rule_id?: string
+  rule_name?: string
+  artifact_id?: string
+  artifact_path?: string
+  matches?: RawYaraMatch[] | string
+  scanned_at?: string
+}
+
+type RawNetworkConnection = {
+  protocol?: string
+  local_addr?: string
+  local_address?: string
+  local_port?: number
+  remote_addr?: string
+  remote_address?: string
+  remote_port?: number
+  state?: string
+  pid?: number
+  process_name?: string
+}
+
+type RawDNSCacheEntry = {
+  name?: string
+  type?: string
+  data?: string
+  record?: string
+  ttl?: number
+}
+
+type RawARPEntry = {
+  ip_address?: string
+  mac_address?: string
+  type?: string
+  interface?: string
+}
+
+type RawRouteEntry = {
+  destination?: string
+  netmask?: string
+  gateway?: string
+  interface?: string
+  metric?: number
+}
+
+type RawNetworkSnapshot = {
+  connections?: RawNetworkConnection[]
+  dns_cache?: RawDNSCacheEntry[]
+  arp_table?: RawARPEntry[]
+  routes?: RawRouteEntry[]
+  collected_at?: string
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -125,6 +211,151 @@ function normalizeEvent(raw: RawEvent): Event {
     message: raw.message || '',
     raw_xml: raw.raw_xml || raw.raw_data || '',
     metadata: raw.metadata ?? {},
+  }
+}
+
+function parseActionSteps(steps: string[] | string | undefined): string[] {
+  if (Array.isArray(steps)) {
+    return steps.filter((step): step is string => typeof step === 'string' && step.length > 0)
+  }
+
+  if (typeof steps !== 'string') {
+    return []
+  }
+
+  const trimmed = steps.trim()
+  if (!trimmed) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) {
+      return parsed.filter((step): step is string => typeof step === 'string' && step.length > 0)
+    }
+  } catch {
+    // Fall back to treating the value as a single step when it is not JSON.
+  }
+
+  return [trimmed]
+}
+
+function normalizeActionStatus(status?: string): ActionProposal['status'] {
+  switch (status) {
+    case 'pending':
+    case 'approved':
+    case 'rejected':
+    case 'executed':
+      return status
+    default:
+      return 'pending'
+  }
+}
+
+function normalizeRiskLevel(riskLevel?: string): ActionProposal['risk_level'] {
+  switch (riskLevel) {
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'critical':
+      return riskLevel
+    default:
+      return 'medium'
+  }
+}
+
+function normalizeAction(raw: RawActionProposal): ActionProposal {
+  const rationale = raw.rationale || ''
+
+  return {
+    id: raw.id,
+    case_id: raw.case_id || '',
+    type: raw.type || 'response',
+    title: raw.title || 'Untitled action',
+    description: raw.description || rationale,
+    rationale,
+    steps: parseActionSteps(raw.steps),
+    status: normalizeActionStatus(raw.status),
+    created_at: raw.created_at || '',
+    reviewed_at: raw.reviewed_at || raw.approved_at || '',
+    executed_at: raw.executed_at || '',
+    result: raw.result || '',
+    risk_level: normalizeRiskLevel(raw.risk_level),
+  }
+}
+
+function normalizeYaraMatches(matches: RawYaraResult['matches']): YaraMatch[] {
+  let parsedMatches: RawYaraMatch[] = []
+
+  if (Array.isArray(matches)) {
+    parsedMatches = matches
+  } else if (typeof matches === 'string' && matches.trim()) {
+    try {
+      const parsed = JSON.parse(matches)
+      if (Array.isArray(parsed)) {
+        parsedMatches = parsed
+      }
+    } catch {
+      parsedMatches = []
+    }
+  }
+
+  return parsedMatches.map((match) => ({
+    rule: match.rule || '',
+    namespace: match.namespace || '',
+    strings: (match.strings ?? []).map((stringMatch) => ({
+      name: stringMatch.name || stringMatch.identifier || '',
+      offset: stringMatch.offset ?? 0,
+      data: stringMatch.data || '',
+    })),
+  }))
+}
+
+function normalizeYaraResult(raw: RawYaraResult): YaraResult {
+  return {
+    id: String(raw.id),
+    case_id: raw.case_id || '',
+    rule_id: raw.rule_id || '',
+    rule_name: raw.rule_name || '',
+    artifact_id: raw.artifact_id || '',
+    artifact_path: raw.artifact_path || '',
+    matches: normalizeYaraMatches(raw.matches),
+    scanned_at: raw.scanned_at || '',
+  }
+}
+
+function normalizeNetworkSnapshot(raw: RawNetworkSnapshot): NetworkSnapshot {
+  return {
+    connections: (raw.connections ?? []).map((connection) => ({
+      protocol: connection.protocol || '',
+      local_address: connection.local_address || connection.local_addr || '',
+      local_port: connection.local_port ?? 0,
+      remote_address: connection.remote_address || connection.remote_addr || '',
+      remote_port: connection.remote_port ?? 0,
+      state: connection.state || '',
+      pid: connection.pid ?? 0,
+      process_name: connection.process_name || '',
+    })),
+    dns_cache: (raw.dns_cache ?? []).map((entry) => ({
+      name: entry.name || '',
+      type: entry.type || '',
+      data: entry.data || entry.record || '',
+      ttl: entry.ttl ?? 0,
+    })),
+    arp_table: (raw.arp_table ?? []).map((entry) => ({
+      ip_address: entry.ip_address || '',
+      mac_address: entry.mac_address || '',
+      type: entry.type || '',
+      interface: entry.interface || '',
+    })),
+    routes: (raw.routes ?? []).map((route) => ({
+      destination: route.destination || '',
+      netmask: route.netmask || '',
+      gateway: route.gateway || '',
+      interface: route.interface || '',
+      metric: route.metric ?? 0,
+    })),
+    collected_at: raw.collected_at || '',
   }
 }
 
@@ -204,12 +435,14 @@ export async function getCollectionStatus(caseId: string, jobId: string): Promis
 export async function listArtifacts(
   caseId: string,
   cursor?: string,
-  limit?: number
+  limit?: number,
+  artifactType?: string
 ): Promise<PaginatedResponse<Artifact>> {
   const offset = Number.parseInt(cursor || '0', 10)
   const params = new URLSearchParams()
   if (!Number.isNaN(offset) && offset > 0) params.set('offset', String(offset))
   if (limit) params.set('limit', String(limit))
+  if (artifactType) params.set('type', artifactType)
   const qs = params.toString()
   const response = await request<RawPaginatedResponse<RawArtifact>>(
     `/cases/${caseId}/artifacts${qs ? `?${qs}` : ''}`
@@ -281,7 +514,7 @@ export async function searchEvents(
 }
 
 export async function getEvent(caseId: string, eventId: number): Promise<Event> {
-  const event = await request<RawEvent>(`/cases/${caseId}/events/${eventId}`)
+ const event = await request<RawEvent>(`/cases/${caseId}/events/${eventId}`)
   return normalizeEvent(event)
 }
 
@@ -292,7 +525,8 @@ export async function getTimeline(
   cursor?: string,
   limit?: number,
   timeStart?: string,
-  timeEnd?: string
+  timeEnd?: string,
+  source?: string
 ): Promise<PaginatedResponse<Event>> {
   const offset = Number.parseInt(cursor || '0', 10)
   const params = new URLSearchParams()
@@ -300,6 +534,7 @@ export async function getTimeline(
   if (limit) params.set('limit', String(limit))
   if (timeStart) params.set('start', timeStart)
   if (timeEnd) params.set('end', timeEnd)
+  if (source) params.set('source', source)
   const qs = params.toString()
   const response = await request<RawPaginatedResponse<RawEvent>>(
     `/cases/${caseId}/timeline${qs ? `?${qs}` : ''}`
@@ -310,6 +545,13 @@ export async function getTimeline(
     ...normalized,
     items: normalized.items.map(normalizeEvent),
   }
+}
+
+export async function listTimelineSources(caseId: string): Promise<string[]> {
+  const response = await request<RawPaginatedResponse<string>>(
+    `/cases/${caseId}/timeline/sources`
+  )
+  return response.data ?? response.items ?? []
 }
 
 // ── YARA ───────────────────────────────────────────────
@@ -344,15 +586,17 @@ export async function getYaraResults(caseId: string, ruleId?: string): Promise<Y
   const params = new URLSearchParams()
   if (ruleId) params.set('rule_id', ruleId)
   const qs = params.toString()
-  return request<YaraResult[]>(
+  const results = await request<RawYaraResult[]>(
     `/cases/${caseId}/yara/results${qs ? `?${qs}` : ''}`
   )
+  return (results ?? []).map(normalizeYaraResult)
 }
 
 // ── Actions ────────────────────────────────────────────
 
 export async function listActions(caseId: string): Promise<ActionProposal[]> {
-  return request<ActionProposal[]>(`/cases/${caseId}/actions`)
+  const actions = await request<RawActionProposal[]>(`/cases/${caseId}/actions`)
+  return (actions ?? []).map(normalizeAction)
 }
 
 export async function approveAction(caseId: string, actionId: string): Promise<void> {
@@ -396,7 +640,8 @@ export async function getPersistenceItems(caseId: string): Promise<PersistenceIt
 }
 
 export async function getNetworkSnapshot(caseId: string): Promise<NetworkSnapshot> {
-  return request<NetworkSnapshot>(`/cases/${caseId}/network`)
+  const snapshot = await request<RawNetworkSnapshot>(`/cases/${caseId}/network-snapshot`)
+  return normalizeNetworkSnapshot(snapshot)
 }
 
 export async function getProcessSnapshot(caseId: string): Promise<ProcessInfo[]> {

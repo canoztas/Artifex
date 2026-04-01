@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/artifex/dfir/internal/models"
 	"github.com/google/uuid"
-	"github.com/pickaxe/dfir/internal/models"
 )
 
 const geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta"
@@ -101,10 +101,10 @@ func (g *GeminiProvider) Chat(ctx context.Context, messages []Message, tools []T
 // ---------------------------------------------------------------------------
 
 type geminiRequest struct {
-	Contents          []geminiContent          `json:"contents"`
-	Tools             []geminiTool             `json:"tools,omitempty"`
-	SystemInstruction *geminiContent           `json:"systemInstruction,omitempty"`
-	GenerationConfig  *geminiGenerationConfig  `json:"generationConfig,omitempty"`
+	Contents          []geminiContent         `json:"contents"`
+	Tools             []geminiTool            `json:"tools,omitempty"`
+	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
+	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type geminiContent struct {
@@ -210,11 +210,15 @@ func (g *GeminiProvider) buildRequest(messages []Message, tools []ToolDefinition
 			if err := json.Unmarshal([]byte(msg.Content), &respData); err != nil {
 				respData = map[string]interface{}{"result": msg.Content}
 			}
+			toolName := msg.ToolName
+			if toolName == "" {
+				toolName = msg.ToolCallID
+			}
 			contents = append(contents, geminiContent{
 				Role: "user",
 				Parts: []geminiPart{{
 					FunctionResponse: &geminiFunctionResponse{
-						Name:     msg.ToolCallID,
+						Name:     toolName,
 						Response: respData,
 					},
 				}},

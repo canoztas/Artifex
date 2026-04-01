@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pickaxe/dfir/internal/api"
-	"github.com/pickaxe/dfir/internal/audit"
-	"github.com/pickaxe/dfir/internal/db"
-	"github.com/pickaxe/dfir/internal/evidence"
-	"github.com/pickaxe/dfir/internal/llm"
-	"github.com/pickaxe/dfir/internal/models"
+	"github.com/artifex/dfir/internal/api"
+	"github.com/artifex/dfir/internal/audit"
+	"github.com/artifex/dfir/internal/db"
+	"github.com/artifex/dfir/internal/evidence"
+	"github.com/artifex/dfir/internal/llm"
+	"github.com/artifex/dfir/internal/models"
 )
 
 func main() {
@@ -66,7 +66,7 @@ func run() error {
 	}
 
 	// Initialize database.
-	dbPath := filepath.Join(dbDir, "pickaxe.db")
+	dbPath := filepath.Join(dbDir, "artifex.db")
 	database, err := db.Init(dbPath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -104,6 +104,10 @@ func run() error {
 
 	// Top-level mux serves both API and frontend static files.
 	topMux := http.NewServeMux()
+	topMux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","service":"api"}`))
+	})
 	topMux.Handle("/api/", srv.Handler())
 
 	// Serve frontend SPA.
@@ -138,7 +142,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("Pickaxe API server listening on %s", addr)
+		log.Printf("Artifex API server listening on %s", addr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
